@@ -1,13 +1,23 @@
 """
-Hyperparameter Optimization module for the MISO RLS Adaptive Filter and Heart Rate Detector
-using Subject-Wise Group K-Fold Cross-Validation and Conditional TPE + Early Pruning.
+Hyperparameter Optimization module for the Re-Architected MISO RLS Adaptive Filter and
+Heart Rate Detector using Subject-Wise Group K-Fold Cross-Validation and Conditional TPE.
 
 Architecture:
-1. Conditional Tree Search Space (RLS + Heart Rate Detector Only):
+1. Reparameterized Conditional Tree Search Space (RLS + Heart Rate Detector Only):
    - Adaptive Filter (`rls`):
-     * `M` in [6, 24] (number of FIR taps per accelerometer axis; total taps = 3 * M)
-     * `lam` in [0.96, 0.9999] (exponential forgetting factor)
-     * `delta` in [0.01, 100.0] (regularization constant for P[0] = delta^{-1} I, log-scale)
+     * `M` in [6, 18]: Number of FIR taps per accelerometer axis (total MISO taps L = 3 * M).
+     * `delay_step` in {1, 2, 3, 4}: Tap dilation stride D (in samples), breaking narrowband
+       [0.5, 4.0] Hz collinearity and expanding temporal aperture T_aperture = (M - 1) * D / fs.
+     * `N_eff` in [150.0, 2500.0] (log-scale): Effective memory horizon N_eff = 1 / (1 - lam),
+       reparameterizing the forgetting factor lam = 1 - 1 / N_eff so TPE explores multi-beat
+       horizons (1.2 s to 20 s) smoothly without boundary pinning.
+     * `delta` in [0.05, 10.0] (log-scale): Dimension-invariant input-power regularization
+       initializing P[0] = (delta * L)^{-1} I_L.
+     * `diag_load` in [0.05, 1.0] (log-scale): Persistent diagonal shrinkage bounding null-space
+       eigenvalues of P[n] when lam < 1.
+     * `huber_c` in [1.5, 4.0]: Huber M-estimator threshold clipping impulsive innovation spikes.
+     * `warm_start_ratio` in {0.0, 0.25, 0.5}: Intra-window reverse-time warm-start fraction
+       eliminating cold-start transients at n = 0 without cross-window state propagation.
    - Categorical Heart Rate Detector Choice:
      * `hr_algorithm` in {'periodogram', 'elgendi'}
    - Conditioned HR Sub-Parameters:
@@ -64,19 +74,25 @@ except ImportError:
     )
     from pipeline import HeartRateEstimatorModel
 
-# Maximum filter taps per accelerometer axis in the search space (3 axes * 24 = 72 MISO taps)
-MAX_M: int = 24
+# Maximum filter taps per axis and maximum dilation stride for precomputing the delay tensor
+MAX_M: int = 18
+MAX_DELAY_STEP: int = 4
+MAX_LAG: int = MAX_M * MAX_DELAY_STEP
 
 # ============================================================================
-# Conditional Tree Hyperparameter Search Space Definition (RLS + HR Detector)
+# Conditional Tree Hyperparameter Search Space Definition (Re-Architected RLS + HR)
 # ============================================================================
 CONDITIONAL_SEARCH_SPACE: dict = {
     "lms_algorithm": ["rls"],
     "hr_algorithm": ["periodogram", "elgendi"],
     "rls_subspace": {
         "M": ("int", 6, MAX_M),
-        "lam": ("float", 0.96, 0.9999),
-        "delta": ("log_float", 0.01, 100.0),
+        "delay_step": ("choice", [1, 2, 3, 4]),
+        "N_eff": ("log_float", 150.0, 2500.0),
+        "delta": ("log_float", 0.05, 10.0),
+        "diag_load": ("log_float", 0.05, 1.0),
+        "huber_c": ("float", 1.5, 4.0),
+        "warm_start_ratio": ("choice", [0.0, 0.25, 0.5]),
     },
     "hr_subspaces": {
         "periodogram": {
@@ -230,7 +246,7 @@ class ConditionalTPE:
         return [pool[i][0] for i in order[:n_good]], [pool[i][0] for i in order[n_good:]]
 
     def sample_rls_node(self) -> dict:
-        """Sample RLS hyperparameters (`M`, `lam`, `delta`)."""
+        """Sample re-architected RLS hyperparameters (`M`, `delay_step`, `N_eff`, `delta`, `diag_load`, `huber_c`, `warm_start_ratio`)."""
         use_tpe = len(self.trials) >= self.n_startup_trials
         good_cfgs, bad_cfgs = self._split_good_bad() if use_tpe else ([], [])
 
@@ -243,12 +259,13 @@ class ConditionalTPE:
             if len(good_branch) >= 2 and len(bad_branch) >= 2:
                 rls_params[pname] = self._sample_tpe_1d(
                     pspec,
-                    [p[pname] for p in good_branch],
-                    [p[pname] for p in bad_branch],
+                    [p[pname] for p in good_branch if pname in p],
+                    [p[pname] for p in bad_branch if pname in p],
                 )
             else:
                 rls_params[pname] = self._sample_param_prior(pspec)
 
+        rls_params["lam"] = float(1.0 - (1.0 / float(rls_params["N_eff"])))
         return {"lms_algorithm": "rls", "lms_params": rls_params}
 
     def sample_full_tree(self) -> dict:
@@ -338,16 +355,16 @@ class MedianFoldPruner:
 
 
 # ============================================================================
-# Preprocessed Window & 3-Axis MISO Delay Tensor Cache
+# Preprocessed Window & 3-Axis MISO Dilated Delay Tensor Cache
 # ============================================================================
 def preprocess_dataset_windows(
     X: np.ndarray,
     lo: float = 0.5,
     hi: float = 4.0,
     fs: float = FS,
-    max_M: int = MAX_M,
+    max_lag: int = MAX_LAG,
 ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
-    """Preprocess all 5D windows `(n_windows, 5, N)` and precompute `U_max` of shape `(N, 3, max_M)`."""
+    """Preprocess all 5D windows `(n_windows, 5, N)` and precompute `U_max` of shape `(N, 3, max_lag)`."""
     ppg1_all, ppg2_all, acc_all = preprocess_signal(X, lo=lo, hi=hi, fs=fs)
     cached = []
     for i in range(len(X)):
@@ -355,7 +372,7 @@ def preprocess_dataset_windows(
         ppg2 = ppg2_all[i]
         acc = acc_all[i]
         N = len(ppg1)
-        U_max_3d = build_U(acc, max_M).reshape(N, 3, max_M)
+        U_max_3d = build_U(acc, max_lag, delay_step=1).reshape(N, 3, max_lag)
         cached.append((ppg1, ppg2, acc, U_max_3d))
     return cached
 
@@ -367,9 +384,15 @@ def _filter_cached_window(
     lms_params: dict,
 ) -> np.ndarray:
     """Run parallel 3-axis MISO adaptive filtering + SNR-Weighted Late Fusion using precomputed `U_max_3d`."""
-    ppg1, ppg2, _, U_max_3d = cached_win
+    ppg1, ppg2, acc, U_max_3d = cached_win
     N = len(ppg1)
-    U = U_max_3d[:, :, :M].reshape(N, 3 * M)
+    delay_step = int(lms_params.get("delay_step", 2 if lms_algo == "rls" else 1))
+    span = M * delay_step
+    if span <= U_max_3d.shape[2]:
+        U = U_max_3d[:, :, :span:delay_step].reshape(N, 3 * M)
+    else:
+        U = build_U(acc, M, delay_step=delay_step)
+
     if lms_algo == "rls":
         e1, _, _, e2, _, _ = _rls_dual_channel(ppg1, ppg2, U, M=M, **lms_params)
     else:
@@ -386,16 +409,16 @@ def run_phase1_snr_screening(
     preprocessed_windows: list[tuple],
     y: np.ndarray,
     screening_indices: np.ndarray,
-    n_trials: int = 12,
-    top_k: int = 2,
+    n_trials: int = 16,
+    top_k: int = 3,
     seed: int = 42,
 ) -> tuple[list[dict], list[dict]]:
-    """Phase 1: Fast Screening of RLS hyperparameters (`M`, `lam`, `delta`) on a subset of training windows.
+    """Phase 1: Fast Screening of RLS hyperparameters on a subset of training windows.
 
     Evaluates candidate RLS configurations on `screening_indices` by measuring both
     in-band cardiac spectral SNR and periodogram BPM accuracy against ground-truth `y`.
     """
-    tpe = ConditionalTPE(seed=seed, gamma_quantile=0.25, n_startup_trials=5)
+    tpe = ConditionalTPE(seed=seed, gamma_quantile=0.25, n_startup_trials=6)
     phase1_history: list[dict] = []
 
     for trial_idx in range(n_trials):
@@ -448,7 +471,7 @@ def run_phase2_tpe_optimization(
     y: np.ndarray,
     splits: list[tuple[np.ndarray, np.ndarray]],
     seed_rls_configs: list[dict],
-    n_trials: int = 14,
+    n_trials: int = 18,
     prune_percentile: float = 50.0,
     seed: int = 42,
 ) -> tuple[dict, float, list[dict]]:
@@ -457,7 +480,7 @@ def run_phase2_tpe_optimization(
     for rls_cfg in seed_rls_configs:
         for hr_algo in CONDITIONAL_SEARCH_SPACE["hr_algorithm"]:
             hr_default = (
-                {"nfft": 8192, "window_type": "hann"}
+                {"nfft": 8192, "window_type": "hamming"}
                 if hr_algo == "periodogram"
                 else {"w1_sec": 0.111, "w2_sec": 0.667, "beta_offset": 0.02}
             )
@@ -631,39 +654,23 @@ def summarize_algorithm_comparisons(
 
 
 # ============================================================================
-# Master Execution Function: Optimizes RLS Only & Includes Project 1 Optimal Models
+# Master Execution Function: Optimizes Re-Architected RLS & Includes Project 1 Models
 # ============================================================================
 def optimize_hr_pipeline(
     X: np.ndarray,
     y: np.ndarray,
     n_splits: int = 5,
-    phase1_trials: int = 12,
+    phase1_trials: int = 16,
     phase1_sample_size: int = 150,
-    phase1_top_k: int = 2,
-    phase2_trials: int = 14,
+    phase1_top_k: int = 3,
+    phase2_trials: int = 18,
     prune_percentile: float = 50.0,
     seed: int = 42,
 ) -> dict:
-    """Optimize `rls` hyperparameters and HR detector (`periodogram` vs `elgendi`) via Group K-Fold CV.
+    """Optimize re-architected `rls` hyperparameters and HR detector (`periodogram` vs `elgendi`) via Group K-Fold CV.
 
     `nlms` and `vs_lms` are included directly with their optimal hyperparameters already
     obtained in Project 1 so they do not need to be re-optimized.
-
-    Returns
-    -------
-    dict
-        Dictionary containing:
-        - `'rls_model'`: Optimized `HeartRateEstimatorModel` for RLS
-        - `'best_model'`: Alias for `'rls_model'`
-        - `'best_hyperparameters'`: Winning RLS + HR detector hyperparameter configuration
-        - `'best_score'`: Best cross-validated composite objective score for RLS
-        - `'results_by_lms'`: Dictionary with keys `'nlms'`, `'vs_lms'`, and `'rls'`,
-          each containing `'model'`, `'hyperparameters'`, `'score_objective'`, `'score_aae'`,
-          `'score_rmse'`, and `'outlier_pct'`
-        - `'baseline_cv'`: Cross-validated metrics before adaptive filtering
-        - `'comparison_summary'`: Summary across `(RLS x HR)` algorithm pairs
-        - `'phase1_trials'`: Phase 1 trial history for RLS
-        - `'phase2_trials'`: Phase 2 trial history for RLS
     """
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -681,7 +688,7 @@ def optimize_hr_pipeline(
 
     baseline_cv = evaluate_baseline_without_lms(preprocessed_windows, y, splits)
 
-    # Optimize ONLY the RLS algorithm and HR detection model
+    # Optimize ONLY the re-architected RLS algorithm and HR detection model
     top_rls_cfg, p1_hist = run_phase1_snr_screening(
         preprocessed_windows=preprocessed_windows,
         y=y,

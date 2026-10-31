@@ -1,17 +1,26 @@
 """
-Adaptive MISO filtering algorithms (RLS, NLMS, and VS-LMS) and Late Fusion bucket function.
+Adaptive MISO filtering algorithms (Re-Architected RLS, NLMS, and VS-LMS) and Late Fusion bucket.
 
 Implements the adaptive filtering stage of the PPG heart signal reconstruction pipeline:
 - Primary input `d[n]`: Preprocessed PPG channel (`s[n] + m[n]`, cardiac signal + motion artifact).
-- Reference input `a[n]`: 3-axis accelerometer tapped-delay vector `[a_1^T[n], a_2^T[n], a_3^T[n]]^T`.
+- Reference input `a[n]`: 3-axis accelerometer dilated tapped-delay vector `[a_1^T[n], a_2^T[n], a_3^T[n]]^T`.
 - MISO motion artifact estimate:
       m_hat[n] = sum_{k=1}^{3} w_k^T[n] a_k[n] = w^T[n] a[n]
 - Cleared cardiac signal (a priori error / innovation output):
       e[n] = d[n] - m_hat[n] = s[n] + m[n] - w^T[n] a[n]
 
 Includes:
-1. `rls`: Recursive Least Squares (RLS) MISO adaptive filter with all hyperparameters tunable
-   (`M`, forgetting factor `lam` / `lambda_`, regularization parameter `delta`, and `w_init`).
+1. `rls`: Re-architected Recursive Least Squares (RLS) MISO adaptive filter with all hyperparameters
+   tunable:
+   - `M`: Filter taps per accelerometer axis (total MISO taps `L = 3 * M`).
+   - `delay_step`: Tap dilation stride `D >= 1` breaking narrowband `[0.5, 4.0] Hz` collinearity
+     and expanding temporal aperture `T_aperture = (M - 1) * D / fs`.
+   - `lam` / `N_eff`: Exponential forgetting factor `lam = 1 - 1 / N_eff`.
+   - `delta`: Dimension-invariant regularization `P[0] = (delta * L)^{-1} I_L`.
+   - `diag_load`: Persistent diagonal shrinkage preventing null-space covariance blowup when `lam < 1`.
+   - `huber_c`: Huber M-estimator robust innovation clipping protecting `w[n]` against impulsive spikes.
+   - `warm_start_ratio`: Strictly intra-window reverse-time warm-up pass eliminating cold-start
+     transients at `n = 0` without cross-window state propagation.
 2. `nlms`: Normalized MISO LMS configured with the optimal hyperparameters obtained in Project 1
    (`M = 22`, `mu = 0.01288`, `delta = 0.5`).
 3. `vs_lms`: Variable Step-Size MISO LMS configured with the optimal hyperparameters obtained in Project 1
@@ -59,90 +68,135 @@ OPTIMAL_VS_LMS_HR_CONFIG: dict = {
 }
 
 
-def _prepare_regressor(acc_or_U: np.ndarray, N: int, M: int) -> np.ndarray:
+def _prepare_regressor(
+    acc_or_U: np.ndarray, N: int, M: int, delay_step: int = 1
+) -> np.ndarray:
     """Return the (N, 3 * M) regressor matrix U from either `acc` (3, N) or prebuilt `U`."""
     arr = np.asarray(acc_or_U, dtype=float)
     if arr.ndim == 2 and arr.shape[0] == N and arr.shape[1] != N:
         return arr
-    return build_U(arr, M)
+    return build_U(arr, M, delay_step=delay_step)
+
+
+def _resolve_rls_forgetting(
+    lam: float = 0.996,
+    lambda_: float | None = None,
+    N_eff: float | None = None,
+) -> float:
+    """Resolve forgetting factor `lam` from either `N_eff` (effective memory horizon) or `lam`."""
+    if N_eff is not None:
+        n_eff_val = max(10.0, float(N_eff))
+        lam_val = 1.0 - (1.0 / n_eff_val)
+    else:
+        lam_val = float(lambda_ if lambda_ is not None else lam)
+    if not (0.0 < lam_val <= 1.0):
+        raise ValueError(f"Forgetting factor 'lam' must be in (0, 1], got {lam_val}.")
+    return lam_val
 
 
 # ============================================================================
-# 1. Recursive Least Squares (RLS) MISO Adaptive Filter (All Hyperparameters Tunable)
+# 1. Re-Architected Recursive Least Squares (RLS) MISO Adaptive Filter
 # ============================================================================
 def rls(
     d: np.ndarray,
     acc: np.ndarray,
     M: int = 12,
-    lam: float = 0.99,
+    lam: float = 0.996,
     delta: float = 1.0,
+    delay_step: int = 2,
+    N_eff: float | None = None,
+    diag_load: float = 0.25,
+    huber_c: float = 2.5,
+    warm_start_ratio: float = 0.35,
     lambda_: float | None = None,
     w_init: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Recursive Least Squares (RLS) MISO adaptive filter.
+    """Re-architected MISO Recursive Least Squares (RLS) adaptive filter.
 
-    Minimizes the exponentially weighted deterministic least-squares cost function:
-        J[n] = sum_{i=0}^{n} lam^{n-i} |d[i] - w^T[n] a[i]|^2 + delta * lam^{n+1} ||w[n]||^2
-
-    At each sample `n = 0, ..., N - 1`:
-        m_hat[n] = sum_{k=1}^{3} w_k^T[n] a_k[n] = w^T[n] a[n]
-        e[n]     = d[n] - m_hat[n]
-        pi[n]    = P[n] a[n]
-        k[n]     = pi[n] / (lam + a^T[n] pi[n])
-        w[n + 1] = w[n] + k[n] * e[n]
-        P[n + 1] = lam^{-1} * (P[n] - k[n] pi^T[n])
-
-    where `P[0] = delta^{-1} I_{3M}` is the initial inverse correlation matrix.
-
-    Parameters
-    ----------
-    d : np.ndarray
-        Primary input signal (preprocessed PPG channel) of shape `(N,)`.
-    acc : np.ndarray
-        Reference 3-axis accelerometer matrix of shape `(3, N)`, or prebuilt
-        regressor matrix `U` of shape `(N, 3 * M)`.
-    M : int, default=12
-        Filter order (number of FIR taps per accelerometer axis; total taps = 3 * M).
-    lam : float, default=0.99
-        Exponential forgetting factor `lambda` in `(0, 1]`. Controls the effective memory
-        length `N_eff = 1 / (1 - lam)` of the sample correlation matrix.
-    delta : float, default=1.0
-        Regularization parameter `delta > 0` initializing the inverse correlation matrix
-        `P[0] = (1 / delta) * I_{3M}` (corresponding to initial correlation `Phi[0] = delta * I`).
-    lambda_ : float, optional
-        Alias for `lam`.
-    w_init : np.ndarray, optional
-        Initial weight vector `w[0]` of shape `(3 * M,)`. Defaults to zeros.
-
-    Returns
-    -------
-    e : np.ndarray
-        Cleared cardiac signal (a priori estimation error) `e[n] = d[n] - m_hat[n]` of shape `(N,)`.
-    m_hat : np.ndarray
-        Estimated motion artifact `m_hat[n] = w^T[n] a[n]` of shape `(N,)`.
-    w : np.ndarray
-        Final MISO filter weight vector of shape `(3 * M,)`.
+    Addresses the 4 failure modes of naive RLS on isolated 8s narrowband PPG/IMU windows:
+    1. Dimension-Invariant Input-Power Regularization:
+       Initializes `P[0] = (delta * L)^{-1} I_L` where `L = 3 * M = E[||a[n]||^2]`, making
+       `delta` invariant to filter order `M`.
+    2. Dilated Tap Delay Stride (`delay_step = D`):
+       Constructs regressor taps spaced by `D` samples (`a_k[n - i*D]`), breaking the extreme
+       sample-to-sample collinearity of `[0.5, 4.0] Hz` signals at `fs = 125 Hz` while
+       expanding the temporal aperture `T_aperture = (M - 1) * D / fs`.
+    3. Persistent Diagonal Loading (`diag_load`):
+       Applies convex covariance shrinkage `P[n+1] <- (1 - tau) P[n+1] + tau P_0 I_L` with
+       `tau = (1 - lam) * diag_load`, bounding the null-space eigenvalues of `P[n]` so
+       `lam < 1` never triggers covariance explosion or cardiac signal cancellation.
+    4. Huber M-Estimator Innovation Clipping (`huber_c`) & Intra-Window Warm-Starting (`warm_start_ratio`):
+       Clips impulsive innovation spikes in the weight update (`|e_tilde[n]| <= huber_c * sigma_e[n]`)
+       and runs an intra-window backward warm-up pass over the first `warm_start_ratio * N` samples
+       so `w[0]` starts already converged at `n = 0` without any cross-window state propagation.
     """
     d = np.asarray(d, dtype=float)
     N = len(d)
-    U = _prepare_regressor(acc, N, M)
+    U = _prepare_regressor(acc, N, M, delay_step=delay_step)
     L = U.shape[1]
 
-    lam_val = float(lambda_ if lambda_ is not None else lam)
-    if not (0.0 < lam_val <= 1.0):
-        raise ValueError(f"Forgetting factor 'lam' must be in (0, 1], got {lam_val}.")
+    lam_val = _resolve_rls_forgetting(lam=lam, lambda_=lambda_, N_eff=N_eff)
     inv_lam = 1.0 / lam_val
 
     delta_val = float(delta)
     if delta_val <= 0.0:
         raise ValueError(f"Regularization parameter 'delta' must be > 0, got {delta_val}.")
 
-    P = (1.0 / delta_val) * np.eye(L, dtype=float)
+    # Dimension-invariant prior inverse variance P_0 = 1 / (delta * L)
+    p0_diag = 1.0 / (delta_val * float(max(1, L)))
+    tau_leak = float(np.clip((1.0 - lam_val) * float(diag_load), 0.0, 0.25))
+    one_minus_tau = 1.0 - tau_leak
+    diag_idx = np.diag_indices(L)
+
+    use_huber = huber_c is not None and float(huber_c) > 0.0
+    huber_thr = float(huber_c) if use_huber else 0.0
+
+    P = np.zeros((L, L), dtype=float)
+    P[diag_idx] = p0_diag
     w = np.zeros(L, dtype=float) if w_init is None else np.array(w_init, dtype=float, copy=True)
-    e = np.empty(N, dtype=float)
-    m_hat = np.empty(N, dtype=float)
 
     dot = np.dot
+
+    # Intra-window reverse-time warm-start pass (strictly within the current isolated window)
+    n_warm = int(round(float(warm_start_ratio) * N)) if w_init is None else 0
+    if n_warm > 1:
+        n_warm = min(N, n_warm)
+        sigma_e_sq = 1.0
+        for n in range(n_warm - 1, -1, -1):
+            a_n = U[n]
+            e_n = d[n] - float(dot(w, a_n))
+            if not np.isfinite(e_n) or abs(e_n) > DIV_THR:
+                w.fill(0.0)
+                P.fill(0.0)
+                P[diag_idx] = p0_diag
+                break
+            if use_huber:
+                sigma_e = np.sqrt(sigma_e_sq)
+                bound = huber_thr * sigma_e
+                e_upd = bound if e_n > bound else (-bound if e_n < -bound else e_n)
+                sigma_e_sq = 0.98 * sigma_e_sq + 0.02 * (e_upd * e_upd)
+            else:
+                e_upd = e_n
+
+            pi = dot(P, a_n)
+            denom = lam_val + float(dot(a_n, pi))
+            if denom <= 1e-12:
+                break
+            k = pi * (1.0 / denom)
+            w += e_upd * k
+            P -= k[:, None] * pi[None, :]
+            P *= inv_lam * one_minus_tau
+            if tau_leak > 0.0:
+                P[diag_idx] += tau_leak * p0_diag
+
+        # Reset P toward well-conditioned prior covariance while keeping warm-started weights w[0]
+        P *= 0.5
+        P[diag_idx] += 0.5 * p0_diag
+
+    e = np.empty(N, dtype=float)
+    m_hat = np.empty(N, dtype=float)
+    sigma_e_sq = 1.0
+
     for n in range(N):
         a_n = U[n]
         m_n = float(dot(w, a_n))
@@ -155,6 +209,14 @@ def rls(
             m_hat[n:] = np.nan
             break
 
+        if use_huber:
+            sigma_e = np.sqrt(sigma_e_sq)
+            bound = huber_thr * sigma_e
+            e_upd = bound if e_n > bound else (-bound if e_n < -bound else e_n)
+            sigma_e_sq = 0.98 * sigma_e_sq + 0.02 * (e_upd * e_upd)
+        else:
+            e_upd = e_n
+
         pi = dot(P, a_n)
         denom = lam_val + float(dot(a_n, pi))
         if not np.isfinite(denom) or denom <= 1e-12:
@@ -163,9 +225,11 @@ def rls(
             break
 
         k = pi * (1.0 / denom)
-        w += e_n * k
+        w += e_upd * k
         P -= k[:, None] * pi[None, :]
-        P *= inv_lam
+        P *= inv_lam * one_minus_tau
+        if tau_leak > 0.0:
+            P[diag_idx] += tau_leak * p0_diag
 
     return e, m_hat, w
 
@@ -175,33 +239,45 @@ def _rls_dual_channel(
     ppg2: np.ndarray,
     U: np.ndarray,
     M: int = 12,
-    lam: float = 0.99,
+    lam: float = 0.996,
     delta: float = 1.0,
+    delay_step: int = 2,
+    N_eff: float | None = None,
+    diag_load: float = 0.25,
+    huber_c: float = 2.5,
+    warm_start_ratio: float = 0.35,
     lambda_: float | None = None,
     w_init: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Run parallel MISO RLS on `ppg1` and `ppg2` sharing the inverse correlation matrix `P[n]`.
 
     Because both PPG channels share the exact same 3-axis accelerometer reference `U`,
-    the gain vector `k[n]` and inverse correlation matrix `P[n]` depend strictly on `U`,
-    `lam`, and `delta`, allowing both branches to be updated simultaneously with identical
-    mathematical results to two independent calls to `rls`.
+    the gain vector `k[n]` and regularized inverse correlation matrix `P[n]` depend strictly
+    on `U`, `lam`, `delta`, and `diag_load`, allowing both branches to be updated simultaneously
+    with identical mathematical results to two independent calls to `rls`.
     """
     d1 = np.asarray(ppg1, dtype=float)
     d2 = np.asarray(ppg2, dtype=float)
     N = len(d1)
     L = U.shape[1]
 
-    lam_val = float(lambda_ if lambda_ is not None else lam)
-    if not (0.0 < lam_val <= 1.0):
-        raise ValueError(f"Forgetting factor 'lam' must be in (0, 1], got {lam_val}.")
+    lam_val = _resolve_rls_forgetting(lam=lam, lambda_=lambda_, N_eff=N_eff)
     inv_lam = 1.0 / lam_val
 
     delta_val = float(delta)
     if delta_val <= 0.0:
         raise ValueError(f"Regularization parameter 'delta' must be > 0, got {delta_val}.")
 
-    P = (1.0 / delta_val) * np.eye(L, dtype=float)
+    p0_diag = 1.0 / (delta_val * float(max(1, L)))
+    tau_leak = float(np.clip((1.0 - lam_val) * float(diag_load), 0.0, 0.25))
+    one_minus_tau = 1.0 - tau_leak
+    diag_idx = np.diag_indices(L)
+
+    use_huber = huber_c is not None and float(huber_c) > 0.0
+    huber_thr = float(huber_c) if use_huber else 0.0
+
+    P = np.zeros((L, L), dtype=float)
+    P[diag_idx] = p0_diag
     if w_init is None:
         w1 = np.zeros(L, dtype=float)
         w2 = np.zeros(L, dtype=float)
@@ -209,14 +285,66 @@ def _rls_dual_channel(
         w1 = np.array(w_init, dtype=float, copy=True)
         w2 = np.array(w_init, dtype=float, copy=True)
 
+    dot = np.dot
+
+    # Intra-window reverse-time warm-start pass (strictly within the current isolated window)
+    n_warm = int(round(float(warm_start_ratio) * N)) if w_init is None else 0
+    if n_warm > 1:
+        n_warm = min(N, n_warm)
+        sig1_sq = 1.0
+        sig2_sq = 1.0
+        for n in range(n_warm - 1, -1, -1):
+            a_n = U[n]
+            e1_n = d1[n] - float(dot(w1, a_n))
+            e2_n = d2[n] - float(dot(w2, a_n))
+            if (
+                not np.isfinite(e1_n)
+                or abs(e1_n) > DIV_THR
+                or not np.isfinite(e2_n)
+                or abs(e2_n) > DIV_THR
+            ):
+                w1.fill(0.0)
+                w2.fill(0.0)
+                P.fill(0.0)
+                P[diag_idx] = p0_diag
+                break
+
+            if use_huber:
+                b1 = huber_thr * np.sqrt(sig1_sq)
+                e1_upd = b1 if e1_n > b1 else (-b1 if e1_n < -b1 else e1_n)
+                sig1_sq = 0.98 * sig1_sq + 0.02 * (e1_upd * e1_upd)
+
+                b2 = huber_thr * np.sqrt(sig2_sq)
+                e2_upd = b2 if e2_n > b2 else (-b2 if e2_n < -b2 else e2_n)
+                sig2_sq = 0.98 * sig2_sq + 0.02 * (e2_upd * e2_upd)
+            else:
+                e1_upd = e1_n
+                e2_upd = e2_n
+
+            pi = dot(P, a_n)
+            denom = lam_val + float(dot(a_n, pi))
+            if denom <= 1e-12:
+                break
+            k = pi * (1.0 / denom)
+            w1 += e1_upd * k
+            w2 += e2_upd * k
+            P -= k[:, None] * pi[None, :]
+            P *= inv_lam * one_minus_tau
+            if tau_leak > 0.0:
+                P[diag_idx] += tau_leak * p0_diag
+
+        P *= 0.5
+        P[diag_idx] += 0.5 * p0_diag
+
     e1 = np.empty(N, dtype=float)
     e2 = np.empty(N, dtype=float)
     m_hat1 = np.empty(N, dtype=float)
     m_hat2 = np.empty(N, dtype=float)
 
-    dot = np.dot
     alive1 = True
     alive2 = True
+    sig1_sq = 1.0
+    sig2_sq = 1.0
 
     for n in range(N):
         a_n = U[n]
@@ -230,6 +358,12 @@ def _rls_dual_channel(
                 e1[n:] = np.nan
                 m_hat1[n:] = np.nan
                 alive1 = False
+            elif use_huber:
+                b1 = huber_thr * np.sqrt(sig1_sq)
+                e1_upd = b1 if e1_n > b1 else (-b1 if e1_n < -b1 else e1_n)
+                sig1_sq = 0.98 * sig1_sq + 0.02 * (e1_upd * e1_upd)
+            else:
+                e1_upd = e1_n
 
         if alive2:
             m2_n = float(dot(w2, a_n))
@@ -240,6 +374,12 @@ def _rls_dual_channel(
                 e2[n:] = np.nan
                 m_hat2[n:] = np.nan
                 alive2 = False
+            elif use_huber:
+                b2 = huber_thr * np.sqrt(sig2_sq)
+                e2_upd = b2 if e2_n > b2 else (-b2 if e2_n < -b2 else e2_n)
+                sig2_sq = 0.98 * sig2_sq + 0.02 * (e2_upd * e2_upd)
+            else:
+                e2_upd = e2_n
 
         if not alive1 and not alive2:
             break
@@ -257,12 +397,14 @@ def _rls_dual_channel(
 
         k = pi * (1.0 / denom)
         if alive1:
-            w1 += e1_n * k
+            w1 += e1_upd * k
         if alive2:
-            w2 += e2_n * k
+            w2 += e2_upd * k
 
         P -= k[:, None] * pi[None, :]
-        P *= inv_lam
+        P *= inv_lam * one_minus_tau
+        if tau_leak > 0.0:
+            P[diag_idx] += tau_leak * p0_diag
 
     return e1, m_hat1, w1, e2, m_hat2, w2
 
@@ -406,7 +548,7 @@ def lms_bucket(
     """Bucket function to select an adaptive algorithm (`rls`, `nlms`, or `vs_lms`) and apply Late Fusion.
 
     Executes Dual PPG Parallel Filtering + SNR-Weighted Late Fusion:
-    1. Builds the shared 3-axis MISO regressor matrix `U = build_U(acc, M)` of shape `(N, 3 * M)`.
+    1. Builds the shared 3-axis MISO regressor matrix `U = build_U(acc, M, delay_step)` of shape `(N, 3 * M)`.
     2. Runs the chosen adaptive filter (`rls`, `nlms`, or `vs_lms`) on `ppg1` -> `e1` and `ppg2` -> `e2`.
     3. Fuses `e1` and `e2` via `snr_weighted_late_fusion(e1, e2)` -> `e_fused`.
     """
@@ -429,14 +571,16 @@ def lms_bucket(
         params.pop("M", None)
         M = int(M)
 
+    delay_step = int(params.get("delay_step", 2 if algo_key == "rls" else 1))
     N = len(ppg1)
-    U = _prepare_regressor(acc, N, M)
+    U = _prepare_regressor(acc, N, M, delay_step=delay_step)
 
     if algo_key == "rls":
         e1, m_hat1, w1, e2, m_hat2, w2 = _rls_dual_channel(
             ppg1, ppg2, U, M=M, w_init=w_init, **params
         )
     else:
+        params.pop("delay_step", None)
         lms_fn = LMS_REGISTRY[algo_key]
         e1, m_hat1, w1 = lms_fn(ppg1, U, M=M, w_init=w_init, **params)
         e2, m_hat2, w2 = lms_fn(ppg2, U, M=M, w_init=w_init, **params)

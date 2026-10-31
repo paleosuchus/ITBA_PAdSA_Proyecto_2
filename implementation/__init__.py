@@ -50,6 +50,8 @@ from .pipeline import (
 )
 from .optimization import (
     MAX_M,
+    MAX_DELAY_STEP,
+    MAX_LAG,
     CONDITIONAL_SEARCH_SPACE,
     PROJECT1_CV_REFERENCE,
     ConditionalTPE,
