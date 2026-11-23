@@ -173,7 +173,7 @@ class HeartRateEstimatorModel:
         """Instantiate `lms`/`standard_lms`, `nlms`, or `vs_lms` with Project 1 optimal params.
 
         Optional `**shared_overrides` (e.g. `delay_step`, `huber_c`, `warm_start_ratio`, or `M`)
-        are merged into `lms_params` to enable Option B feature-matched comparisons against RLS.
+        are merged into `lms_params` to enable feature-matched comparisons against RLS.
         """
         key = algorithm.strip().lower().replace("-", "_")
         table = {

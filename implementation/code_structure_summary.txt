@@ -272,7 +272,7 @@ in `optimization.py` (`CONDITIONAL_SEARCH_SPACE["rls_subspace"]`):
      corresponding hyperparameters alongside the re-architected RLS filter via
      5-fold Subject-Wise Group K-Fold Cross-Validation.
 
-4. Option B (Feature-Matched Comparison Between RLS and LMS):
+4. Feature-Matched Comparison Between RLS and LMS (Shared Structural Pipeline):
    - To isolate the intrinsic algorithmic difference between RLS and the LMS
      family without structural asymmetry, `standard_lms` (`lms`), `nlms`, and
      `vs_lms` all support the same `delay_step`, `huber_c`, and
@@ -328,13 +328,13 @@ implementation/
      plus `_rls_dual_channel` for shared-covariance dual-PPG execution.
    - `standard_lms(d, acc, M=11, mu=0.00070, delay_step=1, huber_c=None, warm_start_ratio=0.0, ...)`:
      Standard MISO LMS configured with Project 1 optimal step size and matched
-     Option B structural parameters (`delay_step`, `huber_c`, `warm_start_ratio`).
+     shared structural parameters (`delay_step`, `huber_c`, `warm_start_ratio`).
    - `nlms(d, acc, M=22, mu=0.01288, delta=0.5, delay_step=1, huber_c=None, warm_start_ratio=0.0, w_init=None)`:
      Normalized MISO LMS configured with its optimal Project 1 hyperparameters
-     and matched Option B structural parameters.
+     and matched shared structural parameters.
    - `vs_lms(d, acc, M=18, mu_max=0.06558, mu_min=0.00791, alpha=0.98503, gamma=0.00053, delta=1.0, delay_step=1, huber_c=None, warm_start_ratio=0.0, w_init=None)`:
      Kwong-Johnston Variable Step-Size MISO LMS configured with its optimal
-     Project 1 hyperparameters and matched Option B structural parameters.
+     Project 1 hyperparameters and matched shared structural parameters.
    - `lms_bucket(ppg1, ppg2, acc, algorithm='rls', M=None, **hyperparams)`:
      Runs the selected adaptive filter (`rls`, `lms`/`standard_lms`, `nlms`, or
      `vs_lms`) in parallel on `ppg1` and `ppg2` and fuses `e1` and `e2` via
@@ -358,7 +358,7 @@ implementation/
    - `predict_window_bpm(window_5d, ...)`: End-to-end single-window BPM prediction.
    - `HeartRateEstimatorModel`: Encapsulates a configured Adaptive Filter + HR
      pipeline with `.predict(X)`, `.predict_with_signals(X)`, and
-     `.from_project1_optimal(algorithm, **shared_overrides)` for Option B.
+     `.from_project1_optimal(algorithm, **shared_overrides)` for feature-matched comparisons.
 
 8. optimization.py
    - `optimize_hr_pipeline(X, y, n_splits=5, ...)`: Optimizes ONLY the
@@ -366,17 +366,17 @@ implementation/
      `diag_load`, `huber_c`, `warm_start_ratio`) and selects the best HR detection
      model (`periodogram` vs `elgendi`) using Subject-Wise Group K-Fold CV and
      2-phase Conditional TPE optimization with `MedianFoldPruner`, then evaluates
-     Project 1 optimal `nlms` and `vs_lms` with matched Option B parameters via
+     Project 1 optimal `nlms` and `vs_lms` with matched structural parameters via
      `evaluate_model_cv`.
 
 9. Notebooks:
    - `pipeline_optimization_and_evaluation.ipynb`: Optimizes RLS + HR detector
-     via 5-fold Group K-Fold CV, compares CV and Test performance against Option B
+     via 5-fold Group K-Fold CV, compares CV and Test performance against
      feature-matched NLMS and VS-LMS, and plots subject spread, pipeline stages,
      and Window #481.
    - `comparacion_RLS_vs_LMS.ipynb`: Statistical comparison (cluster bootstrap
      CIs, paired scatter/CDF, per-subject AAE, convergence/cost, ablation, and
-     hyperparameter sensitivity) under Option B feature matching.
+     hyperparameter sensitivity) under feature-matched evaluation.
    - `Comparacion_Unificada_LMS_vs_RLS_SQI_corregido.ipynb`: Unified SQI +
-     statistical comparison of Option B LMS/NLMS/VS-LMS vs. RLS.
+     statistical comparison of feature-matched LMS/NLMS/VS-LMS vs. RLS.
 ================================================================================

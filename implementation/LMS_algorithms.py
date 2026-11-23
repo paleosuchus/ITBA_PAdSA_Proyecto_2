@@ -9,7 +9,7 @@ Implements the adaptive filtering stage of the PPG heart signal reconstruction p
 - Cleared cardiac signal (a priori error / innovation output):
       e[n] = d[n] - m_hat[n] = s[n] + m[n] - w^T[n] a[n]
 
-Option B (Feature-Matched Comparison):
+Feature-Matched Pipeline (Shared Structural Parameters):
 To ensure a strictly fair comparison between RLS and the LMS family, all four adaptive filters
 (`rls`, `standard_lms`/`lms`, `nlms`, and `vs_lms`) support the same structural pipeline features:
 - `delay_step`: Tap dilation stride `D >= 1` breaking narrowband `[0.5, 4.0] Hz` collinearity.
@@ -21,12 +21,12 @@ Includes:
 1. `rls`: Re-architected Recursive Least Squares (RLS) MISO adaptive filter with all hyperparameters
    tunable (`M`, `delay_step`, `lam` / `N_eff`, `delta`, `diag_load`, `huber_c`, `warm_start_ratio`).
 2. `standard_lms` (`lms`): Standard MISO LMS configured with the optimal step size obtained in
-   Project 1 (`M = 11`, `mu = 0.00070`) plus Option B structural parameters.
+   Project 1 (`M = 11`, `mu = 0.00070`) plus shared structural parameters.
 3. `nlms`: Normalized MISO LMS configured with the optimal hyperparameters obtained in Project 1
-   (`M = 22`, `mu = 0.01288`, `delta = 0.5`) plus Option B structural parameters.
+   (`M = 22`, `mu = 0.01288`, `delta = 0.5`) plus shared structural parameters.
 4. `vs_lms`: Variable Step-Size MISO LMS configured with the optimal hyperparameters obtained in Project 1
    (`M = 18`, `mu_max = 0.06558`, `mu_min = 0.00791`, `alpha = 0.98503`, `gamma = 0.00053`, `delta = 1.0`)
-   plus Option B structural parameters.
+   plus shared structural parameters.
 5. `lms_bucket`: Bucket function that runs the selected adaptive filter (`rls`, `lms`/`standard_lms`,
    `nlms`, or `vs_lms`) in parallel on `ppg1` and `ppg2` and fuses the resulting error signals via
    `snr_weighted_late_fusion`.
@@ -128,7 +128,7 @@ def _run_lms_family(
     warm_start_ratio: float = 0.0,
     w_init: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Shared Option B execution engine for `standard_lms`, `nlms`, and `vs_lms`.
+    """Shared feature-matched execution engine for `standard_lms`, `nlms`, and `vs_lms`.
 
     Supports intra-window reverse-time warm-starting (`warm_start_ratio`) and
     Huber M-estimator innovation clipping (`huber_c`) identically to `rls`.
@@ -486,7 +486,7 @@ def _rls_dual_channel(
 
 
 # ============================================================================
-# 2. Standard MISO LMS (Option B Feature-Matched) — Optimal Project 1 Step Size
+# 2. Standard MISO LMS (Feature-Matched Pipeline) — Optimal Project 1 Step Size
 # ============================================================================
 def standard_lms(
     d: np.ndarray,
@@ -499,7 +499,7 @@ def standard_lms(
     my: float | None = None,
     w_init: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Standard MISO LMS using Project 1 optimal parameters with Option B shared features."""
+    """Standard MISO LMS using Project 1 optimal parameters with shared structural features."""
     d = np.asarray(d, dtype=float)
     N = len(d)
     U = _prepare_regressor(acc, N, M, delay_step=delay_step)
@@ -516,7 +516,7 @@ def standard_lms(
 
 
 # ============================================================================
-# 3. Normalized MISO LMS (NLMS, Option B Feature-Matched) — Optimal Project 1 Params
+# 3. Normalized MISO LMS (NLMS, Feature-Matched Pipeline) — Optimal Project 1 Params
 # ============================================================================
 def nlms(
     d: np.ndarray,
@@ -529,11 +529,11 @@ def nlms(
     warm_start_ratio: float = 0.0,
     w_init: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Normalized MISO LMS using Project 1 optimal parameters with Option B shared features.
+    """Normalized MISO LMS using Project 1 optimal parameters with shared structural features.
 
     Default step hyperparameters correspond to the optimal 5-fold Group K-Fold configuration
     obtained in Project 1 (`M = 22`, `mu = 0.01288`, `delta = 0.5`), while supporting matched
-    `delay_step`, `huber_c`, and `warm_start_ratio` for a fair Option B comparison with RLS.
+    `delay_step`, `huber_c`, and `warm_start_ratio` for a fair feature-matched comparison with RLS.
     """
     d = np.asarray(d, dtype=float)
     N = len(d)
@@ -550,7 +550,7 @@ def nlms(
 
 
 # ============================================================================
-# 4. Variable Step-Size MISO LMS (VS-LMS, Option B Feature-Matched)
+# 4. Variable Step-Size MISO LMS (VS-LMS, Feature-Matched Pipeline)
 # ============================================================================
 def vs_lms(
     d: np.ndarray,
@@ -566,12 +566,12 @@ def vs_lms(
     warm_start_ratio: float = 0.0,
     w_init: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Kwong-Johnston Variable Step-Size MISO LMS using Project 1 optimal params + Option B features.
+    """Kwong-Johnston Variable Step-Size MISO LMS using Project 1 optimal params + shared structural features.
 
     Default step hyperparameters correspond to the optimal 5-fold Group K-Fold configuration
     obtained in Project 1 (`M = 18`, `mu_max = 0.06558`, `mu_min = 0.00791`,
     `alpha = 0.98503`, `gamma = 0.00053`, `delta = 1.0`), while supporting matched
-    `delay_step`, `huber_c`, and `warm_start_ratio` for a fair Option B comparison with RLS.
+    `delay_step`, `huber_c`, and `warm_start_ratio` for a fair feature-matched comparison with RLS.
     """
     d = np.asarray(d, dtype=float)
     N = len(d)

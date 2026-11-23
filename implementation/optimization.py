@@ -794,7 +794,7 @@ def optimize_hr_pipeline(
 
     By default (`reoptimize_rls=False`), `rls` uses the already-optimized Project 2
     `PROJECT2_RLS_REFERENCE` configuration while `retrain_algorithms` (`nlms`, `vs_lms`)
-    are retrained from scratch on the new Option B pipeline (`delay_step`, `huber_c`,
+    are retrained from scratch on the feature-matched pipeline (`delay_step`, `huber_c`,
     `warm_start_ratio` + step-size parameters and HR detector).
     """
     X = np.asarray(X, dtype=float)
