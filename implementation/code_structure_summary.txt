@@ -272,17 +272,18 @@ in `optimization.py` (`CONDITIONAL_SEARCH_SPACE["rls_subspace"]`):
      corresponding hyperparameters alongside the re-architected RLS filter via
      5-fold Subject-Wise Group K-Fold Cross-Validation.
 
-4. Feature-Matched Comparison Between RLS and LMS (Shared Structural Pipeline):
-   - To isolate the intrinsic algorithmic difference between RLS and the LMS
-     family without structural asymmetry, `standard_lms` (`lms`), `nlms`, and
-     `vs_lms` all support the same `delay_step`, `huber_c`, and
-     `warm_start_ratio` parameters as `rls`, while keeping their optimal step-size
-     and filter-order hyperparameters from Project 1.
-   - `optimize_hr_pipeline` and the comparison notebooks instantiate `lms`,
-     `nlms`, and `vs_lms` via `HeartRateEstimatorModel.from_project1_optimal(...)`
-     with the matched `delay_step`, `huber_c`, and `warm_start_ratio` values
-     selected for `rls`, and evaluate their CV and Test performance under
-     identical conditions.
+4. Fair Reoptimized Comparison Between RLS and LMS (Shared Structural Pipeline):
+   - To isolate intrinsic algorithmic differences between RLS and the LMS family
+     without structural asymmetry, `standard_lms` (`lms`), `nlms`, and `vs_lms`
+     all support the same `delay_step`, `huber_c`, and `warm_start_ratio`
+     structural parameters as `rls`.
+   - `optimize_hr_pipeline` reoptimizes `nlms` and `vs_lms` from scratch via
+     5-fold Subject-Wise Group K-Fold CV over the updated structural pipeline
+     (jointly tuning `M`, `delay_step`, `huber_c`, `warm_start_ratio`, step-size
+     parameters, and the HR detector), alongside `PROJECT2_RLS_REFERENCE` (and
+     optional full `reoptimize_rls=True`), while `lms` can be instantiated with its
+     Project 1 step size and matched structural parameters via
+     `HeartRateEstimatorModel.from_project1_optimal(...)`.
 
 ================================================================================
 PART IV: MODULE BREAKDOWN
@@ -301,8 +302,7 @@ implementation/
 ├── pipeline.py
 ├── optimization.py
 ├── pipeline_optimization_and_evaluation.ipynb
-├── comparacion_RLS_vs_LMS.ipynb
-├── Comparacion_Unificada_LMS_vs_RLS_SQI_corregido.ipynb
+├── comparacion_LMS_vs_RLS_y_SQI.ipynb
 └── code_structure_summary.txt
 
 1. dataset_preparation.py
@@ -361,22 +361,22 @@ implementation/
      `.from_project1_optimal(algorithm, **shared_overrides)` for feature-matched comparisons.
 
 8. optimization.py
-   - `optimize_hr_pipeline(X, y, n_splits=5, ...)`: Optimizes ONLY the
-     re-architected `rls` hyperparameters (`M`, `delay_step`, `N_eff`, `delta`,
-     `diag_load`, `huber_c`, `warm_start_ratio`) and selects the best HR detection
-     model (`periodogram` vs `elgendi`) using Subject-Wise Group K-Fold CV and
-     2-phase Conditional TPE optimization with `MedianFoldPruner`, then evaluates
-     Project 1 optimal `nlms` and `vs_lms` with matched structural parameters via
+   - `optimize_hr_pipeline(X, y, n_splits=5, ...)`: Reoptimizes `nlms` and
+     `vs_lms` from scratch on the updated structural pipeline (and optimizes or
+     evaluates `rls` via `PROJECT2_RLS_REFERENCE` or `reoptimize_rls=True`) using
+     5-fold Subject-Wise Group K-Fold CV and 2-phase ConditionalTPE optimization
+     with `MedianFoldPruner`, plus evaluates baseline and matched models via
      `evaluate_model_cv`.
 
 9. Notebooks:
-   - `pipeline_optimization_and_evaluation.ipynb`: Optimizes RLS + HR detector
-     via 5-fold Group K-Fold CV, compares CV and Test performance against
-     feature-matched NLMS and VS-LMS, and plots subject spread, pipeline stages,
-     and Window #481.
-   - `comparacion_RLS_vs_LMS.ipynb`: Statistical comparison (cluster bootstrap
-     CIs, paired scatter/CDF, per-subject AAE, convergence/cost, ablation, and
-     hyperparameter sensitivity) under feature-matched evaluation.
-   - `Comparacion_Unificada_LMS_vs_RLS_SQI_corregido.ipynb`: Unified SQI +
-     statistical comparison of feature-matched LMS/NLMS/VS-LMS vs. RLS.
+   - `pipeline_optimization_and_evaluation.ipynb`: Evaluates/reoptimizes RLS,
+     NLMS, and VS-LMS via 5-fold Group K-Fold CV on the updated pipeline, compares
+     CV and Test performance, and plots subject spread, pipeline stages, and
+     Window #481.
+   - `comparacion_LMS_vs_RLS_y_SQI.ipynb`: Unified comparison notebook covering
+     global & common-detector test metrics, participant cluster bootstrap CIs,
+     error CDF and paired window scatter, per-subject AAE, Subject 4 case
+     studies (#481/#484/#534), cold-start convergence and runtime cost, component
+     ablation, correlation conditioning (`R_hat`), extended `delta`/`N_eff`
+     sensitivity, and dual-gate SQI evaluation with movement-regime breakdown.
 ================================================================================
