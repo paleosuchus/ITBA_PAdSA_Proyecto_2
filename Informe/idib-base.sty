@@ -1,0 +1,338 @@
+%%
+%% This is file `idib-base.sty'.
+%%
+%% ----------------------------------------------------------------
+%% @file   idib-base.sty
+%% @brief  Shared infrastructure for the IDIB document classes.
+%% @author Ian Dib <idib@itba.edu.ar>
+%%
+%% Provides what both classes share: fonts and maths setup, the colour palette, document metadata, cross-references, the list variants, margin notes, figure helpers and the formaltable environment.  Loaded by idib-article.cls and idib-book.cls; not used directly in a document.
+%%
+%% @note LaTeX comments are `%`, so this file (and the two classes) documents its public commands and environments with the Doxygen tag vocabulary in `%` blocks.  Doxygen does not parse .sty natively, so the tags are a documentation convention here, not input to a generator.
+%% ----------------------------------------------------------------
+%%
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{idib-base}[2026/08/18 v5.0 Shared IDIB template infrastructure]
+
+% Language (UTF-8 is the LaTeX default since 2018; inputenc is not needed)
+\RequirePackage[spanish,provide=*]{babel}
+
+% Typography
+\RequirePackage[T1]{fontenc}
+\RequirePackage[scaled=0.97]{fbb}
+\RequirePackage[semibold]{sourcesanspro}
+\RequirePackage{sansmath}
+\RequirePackage{amsmath,amssymb,amsthm,mathtools}
+\RequirePackage[italic,eulergreek]{mathastext}
+\RequirePackage[nopatch]{microtype}
+
+% Core packages
+\RequirePackage[table]{xcolor}
+\RequirePackage{enumitem}
+\RequirePackage{tikz}
+\usetikzlibrary{shapes.geometric,positioning,calc}
+\RequirePackage{graphicx}
+\RequirePackage{url}
+\urlstyle{same}
+\RequirePackage{fancyhdr}
+\RequirePackage{caption}
+\RequirePackage{etoolbox}
+\RequirePackage{array}
+\RequirePackage{booktabs}
+\RequirePackage[most]{tcolorbox}
+\RequirePackage{marginnote}
+
+%% @brief Colour palette: navy, gold, grey, cream.  No aliases — each colour is defined once and used by name (e.g. \textcolor{navy}{...}).
+%% @note  A class that wants a monochrome variant re-points the names with
+%%        \colorlet rather than branching at every use site.
+\definecolor{navy}{RGB}{25,55,90}
+\definecolor{gold}{RGB}{185,140,50}
+\definecolor{grey}{RGB}{105,105,105}
+\definecolor{cream}{RGB}{247,243,231}
+
+%% @brief Fill of the header row of a table.  The default is a plain grey that reads the same in every layout; a document re-points it to tint the row, e.g. \colorlet{headrowcolor}{gold!20} or \colorlet{headrowcolor}{navy!10}.
+%% @note Deliberately independent of the colour option: a table looks the same whether or not the rest of the document is in colour, so the same source gives the same table everywhere.
+\colorlet{headrowcolor}{grey!15}
+
+% Spacing (display-math skips match size10.clo; no \everydisplay) Third-level headings are switched off: they are not numbered and stay out of the contents.
+\setcounter{secnumdepth}{2}
+\setcounter{tocdepth}{2}
+\RequirePackage[skip=0.5em plus 2pt minus 1pt, indent=1em]{parskip}
+\linespread{1.08}
+\setlength{\abovedisplayskip}{10pt plus 2pt minus 5pt}
+\setlength{\belowdisplayskip}{10pt plus 2pt minus 5pt}
+\setlength{\abovedisplayshortskip}{0pt plus 3pt}
+\setlength{\belowdisplayshortskip}{5pt plus 2.5pt minus 2pt}
+
+% Captions
+\addto\captionsspanish{\renewcommand{\figurename}{FIGURA}}
+\addto\captionsspanish{\renewcommand{\tablename}{TABLA}}
+\addto\captionsspanish{\renewcommand{\contentsname}{Contenido}}
+\addto\captionsspanish{\renewcommand{\listtablename}{Índice de tablas}}
+\addto\captionsspanish{\renewcommand{\listfigurename}{Índice de figuras}}
+\captionsetup{
+  font=footnotesize, labelfont={sf, color=gold},
+  labelsep=period, justification=centering, singlelinecheck=false
+}
+
+% Metadata.  Title, author and date are the kernel's \title / \author / \date; the two below are the additions both classes need for headers and covers.
+%% @brief Course or subject shown in headers and on the cover.
+\newcommand{\@subject}{}
+\newcommand{\subject}[1]{\renewcommand{\@subject}{#1}}
+%% @brief Institution shown in headers and on the cover (default ITBA).
+\newcommand{\@institution}{ITBA}
+\newcommand{\institution}[1]{\renewcommand{\@institution}{#1}}
+\author{}                                    % kernel default warns; keep quiet
+
+% Cross-references
+%% @brief Hyperlinked reference "FIGURA n" (gold) to a labelled figure.
+\newcommand{\figref}[1]{%
+  \hyperref[#1]{\textcolor{gold}{\footnotesize\sffamily FIGURA~\ref*{#1}}}%
+}
+%% @brief Hyperlinked reference "TABLA n" (gold) to a labelled table.
+\newcommand{\tabref}[1]{%
+  \hyperref[#1]{\textcolor{gold}{\footnotesize\sffamily TABLA~\ref*{#1}}}%
+}
+%% @brief Hyperlinked reference "§ n" (navy) to a labelled section.
+\newcommand{\secref}[1]{%
+  \hyperref[#1]{\textcolor{navy}{\footnotesize\sffamily \S\,\ref*{#1}}}%
+}
+
+% Lists.  The defaults are applied twice — once now, once at \begin{document}, where they have to survive babel-spanish reinstating its own.
+\newcommand{\idib@listdefaults}{%
+  \setlist{noitemsep, leftmargin=1.5em, topsep=0pt, partopsep=0pt}%
+}
+\idib@listdefaults
+\AtBeginDocument{\idib@listdefaults}
+
+%% @brief Exercise parts, two levels deep: "1)", "2)" at the top level and "a)", "b)" for sub-parts, which are the same list nested inside itself rather than a second environment to remember.
+\newlist{parts}{enumerate}{2}
+\setlist[parts]{
+  leftmargin=0pt, labelindent=0pt, labelsep=0.4em,
+  labelwidth=0pt, itemindent=*,
+  topsep=0pt, partopsep=0pt,
+  itemsep=\parskip, parsep=0pt,
+  listparindent=\parindent, align=left
+}
+\setlist[parts,1]{label=\textbf{\arabic*)}}
+\setlist[parts,2]{label=\textbf{\alph*)}, leftmargin=1.6em, topsep=\parskip}
+
+%% @brief Margin note with a small triangular marker.
+%% @param offset  optional vertical offset (default \parskip).
+%% @param text    the note body.
+\newcommand{\sidenote}[2][\parskip]{%
+  \marginnote{%
+    \footnotesize\color{grey}\noindent
+    \raisebox{0.25ex}{\tikz[baseline=-0.1ex]{%
+      \fill[grey](0,0)--(0.4em,0.25em)--(0,0.5em)--cycle;}}%
+    \hspace{0.4em}%
+    \begin{minipage}[t]{\dimexpr\marginparwidth-0.9em\relax}
+      \raggedright\setlength{\parindent}{0pt}#2
+    \end{minipage}%
+  }[#1]%
+}
+
+%% @brief Image in the margin, with an optional caption.
+%% @param width    optional image width (default 0.95\marginparwidth).
+%% @param file     image path.
+%% @param caption  optional caption; omit for none.
+\newcommand{\sideimage}[3][0.95\marginparwidth]{%
+  \marginnote{%
+    \setlength{\parskip}{0pt}\vspace{0.6em}\centering
+    \includegraphics[width=#1]{#2}%
+    \ifblank{#3}{\vspace{0.6em}}{%
+      \vspace{-0.8\baselineskip}%
+      \captionsetup{type=figure, skip=6pt}%
+      \captionof{figure}{#3}\vspace{0.6em}%
+    }%
+  }%
+}
+
+%% @brief Floating figure with a caption.
+%% @param width    optional image width (default 0.85\linewidth).
+%% @param file     image path.
+%% @param caption  the figure caption.
+%% @param label    optional trailing \label key, for \figref to point at.
+\NewDocumentCommand{\mainfigure}{O{0.85\linewidth} m m o}{%
+  \begin{figure}[htbp]
+    \centering
+    \includegraphics[width=#1]{#2}%
+    \caption{#3}%
+    \IfValueT{#4}{\label{#4}}%
+  \end{figure}%
+}
+
+% Table environment
+%
+% The environment supplies the float, the size, the caption and the notes; the
+% body is written by the caller, which picks tabular, tabularx or xltabular as
+% the table needs.  It cannot open the body itself: tabularx reads its contents
+% looking for a literal \end{tabularx}, and split across a definition it never
+% finds one.
+%
+%   \begin{formaltable}[Caption.]{tab:key}[\tabnoteitem{1}{Note.}]
+%     \begin{tabularx}{\linewidth}{lXr}
+%       \toprule \headrow \colhead{A} & \colhead{B} & \colhead{C} \\ \midrule
+%       one \tabnote{1} & two & 3 \\ \bottomrule
+%     \end{tabularx}
+%   \end{formaltable}
+%
+% Use X for the columns that should absorb the leftover width.  A table whose
+% widths are guessed from outside overruns the measure without LaTeX warning,
+% because every column is then a fixed length and nothing is left to complain.
+%
+%% @param caption  optional; when given, adds a numbered label to the table.
+%% @param label    the \label key (required).
+%% @param notes    optional block of \tabnoteitem entries, set under the table.
+%% @note Rules sit flush against the rows, as in a journal table.  \headrow opens the header row (grey tint, once per row) and \colhead marks each of its cells (bold).  Neither takes a colour: the table reads the same in both layouts.
+\RequirePackage{tabularx}
+\RequirePackage{xltabular}
+\newcommand{\colhead}[1]{{\bfseries #1}}
+\newcommand{\headrow}{\rowcolor{headrowcolor}}
+
+%% @brief Float placement used by every formaltable, so a document fixes it once instead of table by table.
+%% @note  A paper can let its tables float, because they illustrate the argument.  A calculation report cannot: each table belongs to the paragraph that introduces it, and its notes are read against it.  Such a document loads `float` and sets \tableplacement{H}.
+\newcommand{\idib@tableplacement}{htbp}
+\newcommand{\tableplacement}[1]{\renewcommand{\idib@tableplacement}{#1}}
+
+\NewDocumentEnvironment{formaltable}{O{} m O{}}{%
+  % \begin{table} does not expand its placement argument, so the specifier is
+  % built first and then run: written inline, LaTeX reads the macro name itself
+  % as the placement and rejects it.
+  \edef\idib@begintable{\noexpand\begin{table}[\idib@tableplacement]}%
+  \idib@begintable
+    \setlength{\aboverulesep}{0pt}\setlength{\belowrulesep}{0pt}%
+    \setlength{\extrarowheight}{0.75ex}%
+    \centering\small\sffamily
+    \def\idib@tablecaption{#1}\def\idib@tablelabel{#2}\def\idib@tablenotes{#3}%
+}{%
+    \idib@tablepie
+  \end{table}%
+}
+
+%% @brief A table that runs past one page, so it cannot be a float: a float is a single box and LaTeX has nowhere to put it.  Same caption and notes, on a body the caller writes with xltabular.
+\NewDocumentEnvironment{longformaltable}{O{} m O{}}{%
+  \begingroup
+    \setlength{\aboverulesep}{0pt}\setlength{\belowrulesep}{0pt}%
+    \setlength{\extrarowheight}{0.75ex}%
+    \small\sffamily
+    \def\idib@tablecaption{#1}\def\idib@tablelabel{#2}\def\idib@tablenotes{#3}%
+}{%
+    \idib@tablepie
+  \endgroup
+  \par\addvspace{\medskipamount}%
+}
+
+%% @brief The notes and the caption that close both table environments.
+\newcommand{\idib@tablepie}{%
+  \ifdefempty{\idib@tablenotes}{}{%
+    \par\addvspace{3pt}%
+    \begingroup
+      \footnotesize\color{grey}\raggedright
+      \setlength{\parskip}{0pt}\setlength{\parindent}{0pt}%
+      \leftskip=1.25em
+      \idib@tablenotes\par
+    \endgroup
+  }%
+  \ifdefempty{\idib@tablecaption}{}{%
+    \captionsetup{type=table, skip=8pt}%
+    \caption{\idib@tablecaption}\label{\idib@tablelabel}%
+  }%
+}
+
+% Table notes
+%
+% A note that belongs to a table belongs under that table and not at the foot of
+% the page: the reader is looking at the table, and a technical document may
+% carry several tables on one page, each with a note of its own.  \footnote
+% inside a tabular sends the text to the page foot and loses that connection.
+%
+% The notes ride in the environment's fourth argument rather than being written
+% loose inside it, because anything written between the rows becomes another row
+% and inherits the column widths.  Numbering restarts with every table and is
+% written by hand: the marks are placed by whoever writes the table and do not
+% always fall in reading order.
+%
+%   \begin{formaltable}[Caption.]{tab:key}{lrr}[\tabnoteitem{1}{What it means.}]
+%     \toprule \headrow \colhead{A} & \colhead{B} \\ \midrule
+%     value \tabnote{1} & other \\ \bottomrule
+%   \end{formaltable}
+%
+% Lowercase Greek in maths
+%
+% mathastext, loaded above, sets maths in the text font.  Its
+% eulergreek option is supposed to take the Greek letters from Euler,
+% but when the fonts it expects are missing it falls back to the text
+% font, and in T1 encoding those slots hold ligatures rather than
+% Greek: \pi comes out as ss, \beta as fi, \mu as a macron.  Nothing
+% fails and the log says nothing; the only symptom is on the page.
+%
+% They are restored from cmmi, the italic maths font of Computer
+% Modern, which is part of every LaTeX installation.
+\DeclareSymbolFont{idibgreek}{OML}{cmm}{m}{it}
+\DeclareMathSymbol{\alpha}{\mathord}{idibgreek}{"0B}
+\DeclareMathSymbol{\beta}{\mathord}{idibgreek}{"0C}
+\DeclareMathSymbol{\gamma}{\mathord}{idibgreek}{"0D}
+\DeclareMathSymbol{\delta}{\mathord}{idibgreek}{"0E}
+\DeclareMathSymbol{\epsilon}{\mathord}{idibgreek}{"0F}
+\DeclareMathSymbol{\zeta}{\mathord}{idibgreek}{"10}
+\DeclareMathSymbol{\eta}{\mathord}{idibgreek}{"11}
+\DeclareMathSymbol{\theta}{\mathord}{idibgreek}{"12}
+\DeclareMathSymbol{\kappa}{\mathord}{idibgreek}{"14}
+\DeclareMathSymbol{\lambda}{\mathord}{idibgreek}{"15}
+\DeclareMathSymbol{\mu}{\mathord}{idibgreek}{"16}
+\DeclareMathSymbol{\nu}{\mathord}{idibgreek}{"17}
+\DeclareMathSymbol{\xi}{\mathord}{idibgreek}{"18}
+\DeclareMathSymbol{\pi}{\mathord}{idibgreek}{"19}
+\DeclareMathSymbol{\rho}{\mathord}{idibgreek}{"1A}
+\DeclareMathSymbol{\sigma}{\mathord}{idibgreek}{"1B}
+\DeclareMathSymbol{\tau}{\mathord}{idibgreek}{"1C}
+\DeclareMathSymbol{\phi}{\mathord}{idibgreek}{"1E}
+\DeclareMathSymbol{\chi}{\mathord}{idibgreek}{"1F}
+\DeclareMathSymbol{\psi}{\mathord}{idibgreek}{"20}
+\DeclareMathSymbol{\omega}{\mathord}{idibgreek}{"21}
+
+% Reference documents
+%
+% A memoria de calculo lists the documents it works from near the front, as
+% part of its initial data, and cites them in the text by number.  These two
+% commands tie the two ends together so the number is a link: \refanchor marks
+% the row of the list and \refdoc the citation in the text.
+%
+%% @brief The number in the reference list, as the target of every citation to it.
+%% @note  Robust because a citation may sit in a caption, whose argument is written to the .lot file and read back: a fragile command breaks on the second pass.
+\DeclareRobustCommand{\refanchor}[1]{\hypertarget{ref:#1}{[#1]}}
+%% @brief A citation in the text; prints [n] and links to the list.
+\DeclareRobustCommand{\refdoc}[1]{\hyperlink{ref:#1}{\textcolor{navy}{[#1]}}}
+
+%% @brief A range of values, as a min-max column of a technical table writes it.
+%% @note  The dash is an en dash and the spacing is thin: a hyphen reads as part of the number and a full space breaks the pair across a line.
+\newcommand{\rango}[2]{#1\,\textendash\,#2}
+%% @brief A cell with no value.  A technical table marks the absence instead of leaving the cell blank, so the reader can tell it apart from an oversight.
+\newcommand{\nodato}{\textendash}
+
+%% @brief Reference mark for a table note, placed inside the cell.
+\newcommand{\tabnote}[1]{\textsuperscript{\,#1)}}
+%% @brief One entry of the note block.
+\newcommand{\tabnoteitem}[2]{%
+  \par\noindent\makebox[1.25em][l]{#1)}\ignorespaces#2%
+}
+
+% Proofs keep amsthm's proof environment — babel prints the "Demostración." label and \qedsymbol closes with the hollow QED square — but the body starts on its own line: the \mbox{}\par below breaks after the label, which the stock environment runs on.  The filled \qedsolution (idib-book) marks the end of a worked solution, so the two end-markers stay distinct.
+\renewenvironment{proof}[1][\proofname]{%
+  \par\pushQED{\qed}%
+  \normalfont\topsep6\p@\@plus6\p@\relax
+  \trivlist
+  \item[\hskip\labelsep\itshape#1\@addpunct{.}]\mbox{}\par\nobreak
+  \ignorespaces
+}{\popQED\endtrivlist\@endpefalse}
+
+% Page style defaults
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+%% @brief Spanish sine operator, if babel has not already provided it.
+\providecommand{\sen}{\operatorname{sen}}
+
+\endinput
+%% End of file `idib-base.sty'.
