@@ -42,7 +42,6 @@ from .fusion import (
 from .bpm_detection import (
     zero_padded_periodogram_bpm,
     bpm_from_window,
-    elgendi_systolic_peak_bpm,
     estimate_bpm_window,
     objective_function,
 )
@@ -101,7 +100,6 @@ __all__ = [
     "snr_weighted_late_fusion",
     "zero_padded_periodogram_bpm",
     "bpm_from_window",
-    "elgendi_systolic_peak_bpm",
     "estimate_bpm_window",
     "objective_function",
     "reconstruct_heart_signal",

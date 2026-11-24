@@ -273,10 +273,10 @@ in `optimization.py` (`CONDITIONAL_SEARCH_SPACE["rls_subspace"]`):
    and serializes winning configurations to `optimized_models_config.json` for
    automatic consumption by `comparacion_LMS_vs_RLS_y_SQI.ipynb`.
 
-3. Heart Rate Detector Selection Inside the Optimization Loop:
-   - Continues to optimize `hr_algorithm` in {'periodogram', 'elgendi'} and its
-     corresponding hyperparameters alongside the re-architected RLS filter via
-     5-fold Subject-Wise Group K-Fold Cross-Validation.
+3. Heart Rate Detector Hyperparameters Inside the Optimization Loop:
+   - Forces `hr_algorithm = 'periodogram'` across all adaptive filters for direct
+     comparability and tunes its `(nfft, window_type)` hyperparameters alongside
+     the adaptive filter via 5-fold Subject-Wise Group K-Fold Cross-Validation.
 
 4. Fair Reoptimized Comparison Between RLS and LMS (Shared Structural Pipeline):
    - To isolate intrinsic algorithmic differences between RLS and the LMS family
@@ -354,8 +354,6 @@ implementation/
 6. bpm_detection.py
    - `zero_padded_periodogram_bpm(x, fs=125, nfft=8192, lo=0.5, hi=4.0, window_type='hann')`:
      Direct zero-padded periodogram peak detector in `[0.5, 4.0] Hz`.
-   - `elgendi_systolic_peak_bpm(x, fs=125, w1_sec, w2_sec, beta_offset)`:
-     Time-domain systolic peak heart rate detector.
    - `estimate_bpm_window(e_window, hr_algorithm, **hr_params)`: HR bucket function.
    - `objective_function(bpm_estimated, bpm_true)`: Outlier-penalized error metric.
 

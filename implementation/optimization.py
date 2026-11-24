@@ -22,11 +22,10 @@ Architecture:
      * `huber_c` in [1.5, 4.0]: Huber M-estimator threshold clipping impulsive innovation spikes.
      * `warm_start_ratio` in {0.0, 0.25, 0.5}: Intra-window reverse-time warm-start fraction
        eliminating cold-start transients at n = 0 without cross-window state propagation.
-   - Categorical Heart Rate Detector Choice:
-     * `hr_algorithm` in {'periodogram', 'elgendi'}
+   - Heart Rate Detector (forced to `'periodogram'` for fair comparability):
+     * `hr_algorithm` in {'periodogram'}
    - Conditioned HR Sub-Parameters:
      * `periodogram`: `nfft` in {4096, 8192}, `window_type` in {'hann', 'hamming', 'blackman'}
-     * `elgendi`:     `w1_sec` in [0.08, 0.14], `w2_sec` in [0.55, 0.80], `beta_offset` in [0.01, 0.08]
 
 2. Joint Reoptimization on the Updated Structural Pipeline:
    - `rls`, `nlms`, and `vs_lms` are each optimized from scratch via 2-phase ConditionalTPE over the
@@ -106,7 +105,7 @@ _RLS_SUBSPACE: dict = {
 
 CONDITIONAL_SEARCH_SPACE: dict = {
     "lms_algorithm": ["nlms", "vs_lms", "rls"],
-    "hr_algorithm": ["periodogram", "elgendi"],
+    "hr_algorithm": ["periodogram"],
     "rls_subspace": _RLS_SUBSPACE,
     "lms_subspaces": {
         "rls": _RLS_SUBSPACE,
@@ -141,11 +140,6 @@ CONDITIONAL_SEARCH_SPACE: dict = {
         "periodogram": {
             "nfft": ("choice", [4096, 8192]),
             "window_type": ("choice", ["hann", "hamming", "blackman"]),
-        },
-        "elgendi": {
-            "w1_sec": ("float", 0.08, 0.14),
-            "w2_sec": ("float", 0.55, 0.80),
-            "beta_offset": ("float", 0.01, 0.08),
         },
     },
 }
@@ -564,15 +558,11 @@ def run_phase2_tpe_optimization(
     prune_percentile: float = 50.0,
     seed: int = 42,
 ) -> tuple[dict, float, list[dict]]:
-    """Phase 2: End-to-End TPE Optimization of `lms_algo` + HR Detector (`periodogram` vs `elgendi`) across Group K-Folds."""
+    """Phase 2: End-to-End TPE Optimization of `lms_algo` + Periodogram HR Detector across Group K-Folds."""
     warm_start_queue: list[dict] = []
     for cfg in seed_configs:
         for hr_algo in CONDITIONAL_SEARCH_SPACE["hr_algorithm"]:
-            hr_default = (
-                {"nfft": 8192, "window_type": "hamming"}
-                if hr_algo == "periodogram"
-                else {"w1_sec": 0.111, "w2_sec": 0.667, "beta_offset": 0.02}
-            )
+            hr_default = {"nfft": 8192, "window_type": "hamming"}
             warm_start_queue.append(
                 {
                     "lms_algorithm": lms_algo,
@@ -756,7 +746,7 @@ def summarize_algorithm_comparisons(
     phase1_history: list[dict],
     phase2_history: list[dict],
 ) -> dict:
-    """Summarize the best RLS performance for each HR detection algorithm (`periodogram` vs `elgendi`)."""
+    """Summarize the best RLS performance for the periodogram HR detection algorithm."""
     best_phase1 = (
         max(phase1_history, key=lambda e: e["mean_snr"]) if phase1_history else {}
     )

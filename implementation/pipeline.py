@@ -11,7 +11,7 @@ Processes each 5-dimensional window `[ppg1, ppg2, accx, accy, accz]` of length N
    - Parallel filtering of `ppg1` and `ppg2` against `acc` (3, N) using `rls` (or the Project 1
      optimal `nlms` / `vs_lms` benchmarks) followed by SNR-Weighted Late Fusion.
 4. Heart Rate Detection (`bpm_detection.py`):
-   - Estimates BPM per window via `zero_padded_periodogram_bpm` or `elgendi_systolic_peak_bpm`.
+   - Estimates BPM per window via `zero_padded_periodogram_bpm`.
 """
 
 import numpy as np
