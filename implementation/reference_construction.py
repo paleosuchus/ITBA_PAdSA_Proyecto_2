@@ -14,10 +14,13 @@ where:
     - w[n]   = [w_1^T[n], w_2^T[n], w_3^T[n]]^T in R^{3M}
 
 Because the preprocessed signals are bandlimited to [0.5, 4.0] Hz at fs = 125 Hz
-(oversampled ~15.6x relative to f_max = 4.0 Hz), a dilation stride D > 1 breaks
-adjacent-sample collinearity, reduces the condition number kappa(R_a) by orders of
-magnitude, and expands the temporal aperture T_aperture = (M - 1) * D / fs without
-increasing the number of adaptive parameters L = 3M.
+(oversampled ~15.6x relative to f_max = 4.0 Hz), unit-stride delays (D = 1) exhibit
+strong sample-to-sample correlation. A dilation stride D > 1 serves as an optional
+conditioning/regularization aid and computation-time saver: it reduces the condition
+number kappa(R_a) and expands the temporal aperture T_aperture = (M - 1) * D / fs
+with fewer adaptive parameters L = 3M (and thus smaller O(L^2) covariance cost in RLS),
+while dense D = 1 configurations with larger M remain viable when paired with proper
+input-power regularization and diagonal loading.
 """
 
 import numpy as np

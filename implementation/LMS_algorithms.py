@@ -12,7 +12,9 @@ Implements the adaptive filtering stage of the PPG heart signal reconstruction p
 Feature-Matched Pipeline (Shared Structural Parameters):
 To ensure a strictly fair comparison between RLS and the LMS family, all four adaptive filters
 (`rls`, `standard_lms`/`lms`, `nlms`, and `vs_lms`) support the same structural pipeline features:
-- `delay_step`: Tap dilation stride `D >= 1` breaking narrowband `[0.5, 4.0] Hz` collinearity.
+- `delay_step`: Optional tap dilation stride `D >= 1` offering a conditioning/regularization
+  alternative and computation-time saver by reducing the parameter count `L = 3M` needed for a
+  given temporal aperture.
 - `huber_c`: Huber M-estimator robust innovation clipping protecting `w[n]` against impulsive spikes.
 - `warm_start_ratio`: Strictly intra-window reverse-time warm-up pass eliminating cold-start
   transients at `n = 0` without cross-window state propagation.
@@ -33,6 +35,10 @@ Includes:
 """
 
 import numpy as np
+from scipy.linalg import blas as _blas
+
+_dgemv = _blas.dgemv
+_dger = _blas.dger
 
 try:
     from .reference_construction import build_U
@@ -218,18 +224,18 @@ def rls(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Re-architected MISO Recursive Least Squares (RLS) adaptive filter.
 
-    Addresses the 4 failure modes of naive RLS on isolated 8s narrowband PPG/IMU windows:
+    Addresses the failure modes of naive RLS on isolated 8s narrowband PPG/IMU windows:
     1. Dimension-Invariant Input-Power Regularization:
        Initializes `P[0] = (delta * L)^{-1} I_L` where `L = 3 * M = E[||a[n]||^2]`, making
-       `delta` invariant to filter order `M`.
-    2. Dilated Tap Delay Stride (`delay_step = D`):
-       Constructs regressor taps spaced by `D` samples (`a_k[n - i*D]`), breaking the extreme
-       sample-to-sample collinearity of `[0.5, 4.0] Hz` signals at `fs = 125 Hz` while
-       expanding the temporal aperture `T_aperture = (M - 1) * D / fs`.
-    3. Persistent Diagonal Loading (`diag_load`):
+       `delta` invariant to filter order `M` and stabilizing even dense high-order `D = 1` filters.
+    2. Persistent Diagonal Loading (`diag_load`):
        Applies convex covariance shrinkage `P[n+1] <- (1 - tau) P[n+1] + tau P_0 I_L` with
        `tau = (1 - lam) * diag_load`, bounding the null-space eigenvalues of `P[n]` so
        `lam < 1` never triggers covariance explosion or cardiac signal cancellation.
+    3. Optional Dilated Tap Delay Stride (`delay_step = D`):
+       Constructs regressor taps spaced by `D` samples (`a_k[n - i*D]`), acting as an optional
+       conditioning/regularization solution and computation-time saver that shrinks `O(L^2)`
+       matrix operations while preserving temporal aperture `T_aperture = (M - 1) * D / fs`.
     4. Huber M-Estimator Innovation Clipping (`huber_c`) & Intra-Window Warm-Starting (`warm_start_ratio`):
        Clips impulsive innovation spikes in the weight update (`|e_tilde[n]| <= huber_c * sigma_e[n]`)
        and runs an intra-window backward warm-up pass over the first `warm_start_ratio * N` samples
@@ -251,14 +257,17 @@ def rls(
     p0_diag = 1.0 / (delta_val * float(max(1, L)))
     tau_leak = float(np.clip((1.0 - lam_val) * float(diag_load), 0.0, 0.25))
     one_minus_tau = 1.0 - tau_leak
-    diag_idx = np.diag_indices(L)
+    p_scale = inv_lam * one_minus_tau
+    diag_add = tau_leak * p0_diag
 
     use_huber = huber_c is not None and float(huber_c) > 0.0
     huber_thr = float(huber_c) if use_huber else 0.0
 
-    P = np.zeros((L, L), dtype=float)
-    P[diag_idx] = p0_diag
-    w = np.zeros(L, dtype=float) if w_init is None else np.array(w_init, dtype=float, copy=True)
+    # Fortran-contiguous P enables zero-copy in-place BLAS dgemv / dger updates
+    P = np.zeros((L, L), dtype=np.float64, order="F")
+    P_flat = P.ravel(order="K")
+    P_flat[:: L + 1] = p0_diag
+    w = np.zeros(L, dtype=np.float64) if w_init is None else np.array(w_init, dtype=np.float64, copy=True)
 
     dot = np.dot
 
@@ -273,27 +282,27 @@ def rls(
             if not np.isfinite(e_n) or abs(e_n) > DIV_THR:
                 w.fill(0.0)
                 P.fill(0.0)
-                P[diag_idx] = p0_diag
+                P_flat[:: L + 1] = p0_diag
                 break
             e_upd, sigma_e_sq = _huber_clip(e_n, sigma_e_sq, huber_thr, use_huber)
 
-            pi = dot(P, a_n)
+            pi = _dgemv(1.0, P, a_n)
             denom = lam_val + float(dot(a_n, pi))
             if denom <= 1e-12:
                 break
-            k = pi * (1.0 / denom)
-            w += e_upd * k
-            P -= k[:, None] * pi[None, :]
-            P *= inv_lam * one_minus_tau
+            inv_denom = 1.0 / denom
+            w += (e_upd * inv_denom) * pi
+            P = _dger(-inv_denom, pi, pi, a=P, overwrite_a=1)
+            P *= p_scale
             if tau_leak > 0.0:
-                P[diag_idx] += tau_leak * p0_diag
+                P_flat[:: L + 1] += diag_add
 
         # Reset P toward well-conditioned prior covariance while keeping warm-started weights w[0]
         P *= 0.5
-        P[diag_idx] += 0.5 * p0_diag
+        P_flat[:: L + 1] += 0.5 * p0_diag
 
-    e = np.empty(N, dtype=float)
-    m_hat = np.empty(N, dtype=float)
+    e = np.empty(N, dtype=np.float64)
+    m_hat = np.empty(N, dtype=np.float64)
     sigma_e_sq = 1.0
 
     for n in range(N):
@@ -310,19 +319,19 @@ def rls(
 
         e_upd, sigma_e_sq = _huber_clip(e_n, sigma_e_sq, huber_thr, use_huber)
 
-        pi = dot(P, a_n)
+        pi = _dgemv(1.0, P, a_n)
         denom = lam_val + float(dot(a_n, pi))
         if not np.isfinite(denom) or denom <= 1e-12:
             e[n:] = np.nan
             m_hat[n:] = np.nan
             break
 
-        k = pi * (1.0 / denom)
-        w += e_upd * k
-        P -= k[:, None] * pi[None, :]
-        P *= inv_lam * one_minus_tau
+        inv_denom = 1.0 / denom
+        w += (e_upd * inv_denom) * pi
+        P = _dger(-inv_denom, pi, pi, a=P, overwrite_a=1)
+        P *= p_scale
         if tau_leak > 0.0:
-            P[diag_idx] += tau_leak * p0_diag
+            P_flat[:: L + 1] += diag_add
 
     return e, m_hat, w
 
@@ -364,19 +373,22 @@ def _rls_dual_channel(
     p0_diag = 1.0 / (delta_val * float(max(1, L)))
     tau_leak = float(np.clip((1.0 - lam_val) * float(diag_load), 0.0, 0.25))
     one_minus_tau = 1.0 - tau_leak
-    diag_idx = np.diag_indices(L)
+    p_scale = inv_lam * one_minus_tau
+    diag_add = tau_leak * p0_diag
 
     use_huber = huber_c is not None and float(huber_c) > 0.0
     huber_thr = float(huber_c) if use_huber else 0.0
 
-    P = np.zeros((L, L), dtype=float)
-    P[diag_idx] = p0_diag
+    # Fortran-contiguous P enables zero-copy in-place BLAS dgemv / dger updates
+    P = np.zeros((L, L), dtype=np.float64, order="F")
+    P_flat = P.ravel(order="K")
+    P_flat[:: L + 1] = p0_diag
     if w_init is None:
-        w1 = np.zeros(L, dtype=float)
-        w2 = np.zeros(L, dtype=float)
+        w1 = np.zeros(L, dtype=np.float64)
+        w2 = np.zeros(L, dtype=np.float64)
     else:
-        w1 = np.array(w_init, dtype=float, copy=True)
-        w2 = np.array(w_init, dtype=float, copy=True)
+        w1 = np.array(w_init, dtype=np.float64, copy=True)
+        w2 = np.array(w_init, dtype=np.float64, copy=True)
 
     dot = np.dot
 
@@ -399,31 +411,31 @@ def _rls_dual_channel(
                 w1.fill(0.0)
                 w2.fill(0.0)
                 P.fill(0.0)
-                P[diag_idx] = p0_diag
+                P_flat[:: L + 1] = p0_diag
                 break
 
             e1_upd, sig1_sq = _huber_clip(e1_n, sig1_sq, huber_thr, use_huber)
             e2_upd, sig2_sq = _huber_clip(e2_n, sig2_sq, huber_thr, use_huber)
 
-            pi = dot(P, a_n)
+            pi = _dgemv(1.0, P, a_n)
             denom = lam_val + float(dot(a_n, pi))
             if denom <= 1e-12:
                 break
-            k = pi * (1.0 / denom)
-            w1 += e1_upd * k
-            w2 += e2_upd * k
-            P -= k[:, None] * pi[None, :]
-            P *= inv_lam * one_minus_tau
+            inv_denom = 1.0 / denom
+            w1 += (e1_upd * inv_denom) * pi
+            w2 += (e2_upd * inv_denom) * pi
+            P = _dger(-inv_denom, pi, pi, a=P, overwrite_a=1)
+            P *= p_scale
             if tau_leak > 0.0:
-                P[diag_idx] += tau_leak * p0_diag
+                P_flat[:: L + 1] += diag_add
 
         P *= 0.5
-        P[diag_idx] += 0.5 * p0_diag
+        P_flat[:: L + 1] += 0.5 * p0_diag
 
-    e1 = np.empty(N, dtype=float)
-    e2 = np.empty(N, dtype=float)
-    m_hat1 = np.empty(N, dtype=float)
-    m_hat2 = np.empty(N, dtype=float)
+    e1 = np.empty(N, dtype=np.float64)
+    e2 = np.empty(N, dtype=np.float64)
+    m_hat1 = np.empty(N, dtype=np.float64)
+    m_hat2 = np.empty(N, dtype=np.float64)
 
     alive1 = True
     alive2 = True
@@ -460,7 +472,7 @@ def _rls_dual_channel(
         if not alive1 and not alive2:
             break
 
-        pi = dot(P, a_n)
+        pi = _dgemv(1.0, P, a_n)
         denom = lam_val + float(dot(a_n, pi))
         if not np.isfinite(denom) or denom <= 1e-12:
             if alive1:
@@ -471,16 +483,16 @@ def _rls_dual_channel(
                 m_hat2[n:] = np.nan
             break
 
-        k = pi * (1.0 / denom)
+        inv_denom = 1.0 / denom
         if alive1:
-            w1 += e1_upd * k
+            w1 += (e1_upd * inv_denom) * pi
         if alive2:
-            w2 += e2_upd * k
+            w2 += (e2_upd * inv_denom) * pi
 
-        P -= k[:, None] * pi[None, :]
-        P *= inv_lam * one_minus_tau
+        P = _dger(-inv_denom, pi, pi, a=P, overwrite_a=1)
+        P *= p_scale
         if tau_leak > 0.0:
-            P[diag_idx] += tau_leak * p0_diag
+            P_flat[:: L + 1] += diag_add
 
     return e1, m_hat1, w1, e2, m_hat2, w2
 

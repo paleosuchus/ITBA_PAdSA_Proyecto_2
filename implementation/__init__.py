@@ -54,6 +54,7 @@ from .pipeline import (
 from .optimization import (
     MAX_M,
     MAX_DELAY_STEP,
+    PRECOMPUTED_MAX_LAG,
     MAX_LAG,
     CONDITIONAL_SEARCH_SPACE,
     PROJECT1_CV_REFERENCE,
@@ -67,6 +68,8 @@ from .optimization import (
     evaluate_model_cv,
     summarize_algorithm_comparisons,
     optimize_hr_pipeline,
+    save_optimization_config,
+    load_optimization_config,
 )
 
 __all__ = [
@@ -106,6 +109,7 @@ __all__ = [
     "HeartRateEstimatorModel",
     "MAX_M",
     "MAX_DELAY_STEP",
+    "PRECOMPUTED_MAX_LAG",
     "MAX_LAG",
     "CONDITIONAL_SEARCH_SPACE",
     "PROJECT1_CV_REFERENCE",
@@ -119,4 +123,6 @@ __all__ = [
     "evaluate_model_cv",
     "summarize_algorithm_comparisons",
     "optimize_hr_pipeline",
+    "save_optimization_config",
+    "load_optimization_config",
 ]

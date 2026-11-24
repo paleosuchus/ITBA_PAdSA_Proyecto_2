@@ -158,23 +158,22 @@ memoryless constraint, we re-architect the MISO RLS branch with five synergistic
 mathematical innovations:
 
 --------------------------------------------------------------------------------
-1. Dilated / Multi-Scale Tapped-Delay Reference Construction (`delay_step = D`)
+1. Optional Dilated Tapped-Delay Reference Construction (`delay_step = D`)
 --------------------------------------------------------------------------------
 Instead of unit-sample spacing (dt = 8 ms), `build_U(acc, M, delay_step=D)`
-constructs a dilated MISO regressor with tap spacing D in {1, 2, 3, 4} samples:
+supports a configurable tap stride D in {1, 2, 3, 4} samples:
 
     a_k^{(D)}[n] = [ a_k[n], a_k[n - D], a_k[n - 2D], ..., a_k[n - (M - 1)D] ]^T
 
-Mathematical benefits:
+Role as an optional conditioning/regularization solution and computation-time saver:
   - Decimating the tap spacing to D * dt (e.g., 16 ms, 24 ms, or 32 ms) respects
-    the 4.0 Hz bandlimit (Nyquist interval = 125 ms) while breaking adjacent-tap
-    collinearity, reducing the condition number chi(R_a) by 3 to 4 orders of
-    magnitude.
-  - Expands the physical impulse-response aperture by factor D:
-        T_aperture = (M - 1) * D / fs
-    reaching 250 - 540 ms (covering a full quarter- to half-cycle of low-frequency
-    motion artifacts) with FEWER adaptive parameters M in [6, 18] (reducing
-    cardiac over-fitting degrees of freedom and cutting O(L^2) complexity).
+    the 4.0 Hz bandlimit (Nyquist interval = 125 ms) while lowering the condition
+    number chi(R_a) by orders of magnitude.
+  - Expands the physical impulse-response aperture T_aperture = (M - 1) * D / fs
+    with fewer adaptive parameters L = 3M, acting as a parameter-compression and
+    computation-time saver (shrinking the O(L^2) covariance matrix P[n]). Once
+    input-power regularization P[0] = (delta * L)^{-1} I_L and `diag_load` are
+    enabled, dense D = 1 filters with large M (up to M = 50) also remain stable.
 
 --------------------------------------------------------------------------------
 2. Dimension-Invariant Input-Power-Scaled Initialization (`delta`)
@@ -259,13 +258,20 @@ in `optimization.py` (`CONDITIONAL_SEARCH_SPACE["rls_subspace"]`):
      the physically relevant multi-heartbeat regime.
 
 2. Full Tunable RLS Subspace in `CONDITIONAL_SEARCH_SPACE`:
-   - `M`                : ("int", 6, 18)              -> 18 to 54 total MISO taps
-   - `delay_step`       : ("choice", [1, 2, 3, 4])    -> Tap dilation stride D
+   - `M`                : ("int", 6, 50)              -> 18 to 150 total MISO taps
+   - `delay_step`       : ("choice", [1, 2, 3, 4])    -> Optional tap dilation stride D
    - `N_eff`            : ("log_float", 150.0, 2500.0)-> Effective memory horizon
-   - `delta`            : ("log_float", 0.05, 10.0)   -> Dimension-invariant ridge
+   - `delta`            : ("log_float", 0.05, 50.0)   -> Dimension-invariant ridge
    - `diag_load`        : ("log_float", 0.05, 1.0)    -> Null-space covariance floor
    - `huber_c`          : ("float", 1.5, 4.0)         -> Robust M-estimator clip
    - `warm_start_ratio` : ("choice", [0.0, 0.25, 0.5])-> Intra-window warm-up pass
+
+   Note: `MAX_M = 50` applies uniformly to RLS, NLMS, VS-LMS, and LMS, while
+   `PRECOMPUTED_MAX_LAG = 96` keeps the precomputed delay tensor compact in RAM
+   (falling back cleanly to `build_U` when `M * delay_step > 96`). Optimization
+   defaults to `reoptimize_rls=True` with boundary checks verifying `M < MAX_M`,
+   and serializes winning configurations to `optimized_models_config.json` for
+   automatic consumption by `comparacion_LMS_vs_RLS_y_SQI.ipynb`.
 
 3. Heart Rate Detector Selection Inside the Optimization Loop:
    - Continues to optimize `hr_algorithm` in {'periodogram', 'elgendi'} and its

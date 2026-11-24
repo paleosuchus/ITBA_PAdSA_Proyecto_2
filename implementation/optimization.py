@@ -1,17 +1,21 @@
 """
-Hyperparameter Optimization module for the Re-Architected MISO RLS Adaptive Filter and
-Heart Rate Detector using Subject-Wise Group K-Fold Cross-Validation and Conditional TPE.
+Hyperparameter Optimization module for the Re-Architected MISO RLS Adaptive Filter,
+Feature-Matched LMS Family (`nlms`, `vs_lms`), and Heart Rate Detector using
+Subject-Wise Group K-Fold Cross-Validation and Conditional TPE.
 
 Architecture:
-1. Reparameterized Conditional Tree Search Space (RLS + Heart Rate Detector Only):
+1. Reparameterized Conditional Tree Search Space (`rls`, `nlms`, `vs_lms` + HR Detector):
    - Adaptive Filter (`rls`):
-     * `M` in [6, 18]: Number of FIR taps per accelerometer axis (total MISO taps L = 3 * M).
-     * `delay_step` in {1, 2, 3, 4}: Tap dilation stride D (in samples), breaking narrowband
-       [0.5, 4.0] Hz collinearity and expanding temporal aperture T_aperture = (M - 1) * D / fs.
+     * `M` in [6, 50]: Number of FIR taps per accelerometer axis (total MISO taps L = 3 * M in [18, 150]).
+       The wide upper bound allows dense `delay_step = 1` models to span long temporal apertures
+       (>390 ms) whenever input-power-scaled regularization and diagonal loading stabilize collinearity.
+     * `delay_step` in {1, 2, 3, 4}: Optional tap dilation stride D (in samples). Acts as a
+       conditioning/regularization aid and computation-time saver by reducing the O(L^2) covariance
+       matrix size required to reach a given temporal aperture T_aperture = (M - 1) * D / fs.
      * `N_eff` in [150.0, 2500.0] (log-scale): Effective memory horizon N_eff = 1 / (1 - lam),
        reparameterizing the forgetting factor lam = 1 - 1 / N_eff so TPE explores multi-beat
        horizons (1.2 s to 20 s) smoothly without boundary pinning.
-     * `delta` in [0.05, 10.0] (log-scale): Dimension-invariant input-power regularization
+     * `delta` in [0.05, 50.0] (log-scale): Dimension-invariant input-power regularization
        initializing P[0] = (delta * L)^{-1} I_L.
      * `diag_load` in [0.05, 1.0] (log-scale): Persistent diagonal shrinkage bounding null-space
        eigenvalues of P[n] when lam < 1.
@@ -24,15 +28,18 @@ Architecture:
      * `periodogram`: `nfft` in {4096, 8192}, `window_type` in {'hann', 'hamming', 'blackman'}
      * `elgendi`:     `w1_sec` in [0.08, 0.14], `w2_sec` in [0.55, 0.80], `beta_offset` in [0.01, 0.08]
 
-2. Pre-Configured Project 1 Optimal Benchmarks (`nlms` and `vs_lms`):
-   - `nlms` and `vs_lms` are not re-optimized; they are instantiated directly with the optimal
-     hyperparameters already obtained in Project 1 for side-by-side comparison against `rls`.
+2. Joint Reoptimization on the Updated Structural Pipeline:
+   - `rls`, `nlms`, and `vs_lms` are each optimized from scratch via 2-phase ConditionalTPE over the
+     same filter-order range `M in [6, 50]` and shared structural options (`delay_step`, `huber_c`,
+     `warm_start_ratio`) alongside their step-size/regularization hyperparameters and HR detector.
 
 3. Validation Protocol:
    - Subject-Wise Group K-Fold (`subject_wise_group_kfold` using `sklearn.model_selection.GroupKFold`):
      partitions windows strictly by participant ID to prevent data leakage.
 """
 
+import json
+import os
 import numpy as np
 
 try:
@@ -78,19 +85,20 @@ except ImportError:
     )
     from pipeline import HeartRateEstimatorModel
 
-# Maximum filter taps per axis and maximum dilation stride for precomputing the delay tensor
-MAX_M: int = 22
+# Maximum filter taps per axis and bounded delay-tensor cache lag (avoids Colab OOM)
+MAX_M: int = 50
 MAX_DELAY_STEP: int = 4
-MAX_LAG: int = MAX_M * MAX_DELAY_STEP
+PRECOMPUTED_MAX_LAG: int = 96
+MAX_LAG: int = PRECOMPUTED_MAX_LAG
 
 # ============================================================================
 # Conditional Tree Hyperparameter Search Space Definition (RLS, NLMS, VS-LMS, LMS + HR)
 # ============================================================================
 _RLS_SUBSPACE: dict = {
-    "M": ("int", 6, 18),
+    "M": ("int", 6, MAX_M),
     "delay_step": ("choice", [1, 2, 3, 4]),
     "N_eff": ("log_float", 150.0, 2500.0),
-    "delta": ("log_float", 0.05, 10.0),
+    "delta": ("log_float", 0.05, 50.0),
     "diag_load": ("log_float", 0.05, 1.0),
     "huber_c": ("float", 1.5, 4.0),
     "warm_start_ratio": ("choice", [0.0, 0.25, 0.5]),
@@ -781,21 +789,20 @@ def optimize_hr_pipeline(
     X: np.ndarray,
     y: np.ndarray,
     n_splits: int = 5,
-    phase1_trials: int = 16,
+    phase1_trials: int = 24,
     phase1_sample_size: int = 150,
-    phase1_top_k: int = 3,
-    phase2_trials: int = 18,
+    phase1_top_k: int = 4,
+    phase2_trials: int = 24,
     prune_percentile: float = 50.0,
     retrain_algorithms: tuple[str, ...] = ("nlms", "vs_lms"),
-    reoptimize_rls: bool = False,
+    reoptimize_rls: bool = True,
     seed: int = 42,
 ) -> dict:
-    """Optimize `nlms` and `vs_lms` (and optionally `rls`) hyperparameters via Group K-Fold CV.
+    """Optimize `nlms`, `vs_lms`, and `rls` hyperparameters via Group K-Fold CV.
 
-    By default (`reoptimize_rls=False`), `rls` uses the already-optimized Project 2
-    `PROJECT2_RLS_REFERENCE` configuration while `retrain_algorithms` (`nlms`, `vs_lms`)
-    are retrained from scratch on the feature-matched pipeline (`delay_step`, `huber_c`,
-    `warm_start_ratio` + step-size parameters and HR detector).
+    Uses `M in [6, MAX_M]` (`MAX_M = 50`) for all adaptive filters so dense (`delay_step = 1`)
+    and dilated (`delay_step > 1`) solutions compete fairly across the full search space.
+    When `reoptimize_rls=False`, evaluates the stored `PROJECT2_RLS_REFERENCE` configuration.
     """
     X = np.asarray(X, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -933,6 +940,21 @@ def optimize_hr_pipeline(
 
     comparison_summary = summarize_algorithm_comparisons(rls_p1_hist, rls_p2_hist)
 
+    boundary_warnings: list[str] = []
+    for algo_key, entry in results_by_lms.items():
+        hp_cfg = entry["hyperparameters"]
+        algo_m = int(hp_cfg["lms_params"]["M"])
+        if algo_m >= MAX_M:
+            boundary_warnings.append(
+                f"{algo_key}: optimal M={algo_m} reached MAX_M={MAX_M}; consider raising MAX_M."
+            )
+        if algo_key == "rls":
+            delta_val = float(hp_cfg["lms_params"].get("delta", 0.0))
+            if delta_val >= 49.0:
+                boundary_warnings.append(
+                    f"rls: optimal delta={delta_val:.3f} is near upper bound 50.0."
+                )
+
     return {
         "rls_model": rls_model,
         "best_model": rls_model,
@@ -941,7 +963,74 @@ def optimize_hr_pipeline(
         "results_by_lms": results_by_lms,
         "baseline_cv": baseline_cv,
         "comparison_summary": comparison_summary,
+        "boundary_warnings": boundary_warnings,
+        "max_m_searched": MAX_M,
         "phase1_top_rls": top_rls_cfg,
         "phase1_trials": rls_p1_hist + all_p1_hist,
         "phase2_trials": rls_p2_hist + all_p2_hist,
     }
+
+
+def _to_json_native(obj):
+    """Recursively convert NumPy scalars/arrays to native Python JSON types."""
+    if isinstance(obj, dict):
+        return {str(k): _to_json_native(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_to_json_native(v) for v in obj]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    return obj
+
+
+def save_optimization_config(
+    opt_results: dict,
+    filepath: str,
+    test_metrics: dict | None = None,
+) -> str:
+    """Serialize optimized CV models and metrics to JSON for downstream comparison notebooks."""
+    algorithms_payload: dict = {}
+    for algo_key, info in opt_results.get("results_by_lms", {}).items():
+        hp = info["hyperparameters"]
+        lms_params = dict(hp["lms_params"])
+        M_val = int(lms_params.pop("M"))
+        entry = {
+            "M": M_val,
+            "lms_params": _to_json_native(lms_params),
+            "hr_algorithm": hp["hr_algorithm"],
+            "hr_params": _to_json_native(hp["hr_params"]),
+            "cv": {
+                "score_objective": float(info["score_objective"]),
+                "score_aae": float(info["score_aae"]),
+                "score_rmse": float(info["score_rmse"]),
+                "outlier_pct": float(info["outlier_pct"]),
+            },
+        }
+        if test_metrics and algo_key in test_metrics:
+            entry["test"] = _to_json_native(test_metrics[algo_key])
+        algorithms_payload[algo_key] = entry
+
+    payload = {
+        "max_m_searched": int(opt_results.get("max_m_searched", MAX_M)),
+        "boundary_warnings": list(opt_results.get("boundary_warnings", [])),
+        "baseline_cv": _to_json_native(opt_results.get("baseline_cv", {})),
+        "algorithms": algorithms_payload,
+    }
+    if test_metrics and "base" in test_metrics:
+        payload["baseline_test"] = _to_json_native(test_metrics["base"])
+
+    out_dir = os.path.dirname(os.path.abspath(filepath))
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return os.path.abspath(filepath)
+
+
+def load_optimization_config(filepath: str) -> dict:
+    """Load an `optimized_models_config.json` artifact saved by `save_optimization_config`."""
+    with open(filepath, "r", encoding="utf-8") as f:
+        return json.load(f)
